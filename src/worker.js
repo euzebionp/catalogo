@@ -1,6 +1,7 @@
 // Catálogo eletrônico — API (Cloudflare Worker + D1 + R2)
 import { brCode } from './pix.js';
 import { importarLinhas } from './importar.js';
+import { ehDemo, DEMO_LOGIN, resetarDemo, garantirDemo } from './demo.js';
 import { PAPEIS, pode, permissoes, gerarHash, conferirSenha, validarSenha, auditar, bloqueado, registrarFalha, limparFalhas } from './usuarios.js';
 import { configurado as tagplusConfigurado, urlAutorizacao, trocarCodigo, lerChave, gravarChave, registrar, api as tagplusApi, renovarToken } from './tagplus/cliente.js';
 import { enfileirar, processarFila, sincronizarProdutos, receberWebhook } from './tagplus/sync.js';
@@ -32,7 +33,7 @@ const slugify = (s) =>
   String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
     .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'item';
 
-const imgUrl = (key) => (!key ? null : /^https?:\/\//.test(key) ? key : '/img/' + key);
+const imgUrl = (key) => (!key ? null : /^(https?:\/\/|\/)/.test(key) ? key : '/img/' + key); // URL externa, arquivo do site (/demo/...) ou foto no KV/R2
 
 function fone(t) {
   const d = digitos(t).replace(/^55(?=\d{10,11}$)/, '');
@@ -549,12 +550,13 @@ async function rotear(req, env) {
 
   // ---- público
   if (path === '/api/loja' && m === 'GET') {
+    if (ehDemo(env)) await garantirDemo(env);
     const [cfg, cats, regs] = await Promise.all([
       getConfig(env),
       env.DB.prepare('SELECT id, nome, slug FROM categorias WHERE ativo = 1 ORDER BY ordem, nome').all(),
       env.DB.prepare('SELECT id, nome, taxa, gratis_acima, prazo FROM regioes_entrega WHERE ativo = 1 ORDER BY ordem, nome').all(),
     ]);
-    return json({ loja: configPublica(cfg), categorias: cats.results, regioes: regs.results });
+    return json({ loja: configPublica(cfg), categorias: cats.results, regioes: regs.results, demo: ehDemo(env) ? DEMO_LOGIN : null });
   }
   if (path === '/api/produtos' && m === 'GET') {
     return new Response(JSON.stringify({ produtos: await carregarProdutos(env) }), {
@@ -588,7 +590,18 @@ async function rotear(req, env) {
     return json({ ...(u.mestre ? MESTRE : publicoUsuario(u)), papel_nome: PAPEIS[u.papel], permissoes: permissoes(u.papel),
       configurar_usuarios: !!u.mestre });
   }
-  if (rec === 'minha-senha' && m === 'POST') return trocarMinhaSenha(req, env, u);
+  const visitanteDemo = ehDemo(env) && u.email === DEMO_LOGIN.email;
+  if (rec === 'minha-senha' && m === 'POST') {
+    if (visitanteDemo) throw new HttpError('Na demonstração a senha do visitante não pode ser trocada.', 403);
+    return trocarMinhaSenha(req, env, u);
+  }
+  if (rec === 'demo' && seg[1] === 'resetar' && m === 'POST') {
+    if (!ehDemo(env)) return erro('Rota não encontrada.', 404);
+    exigir(u, 'usuarios');
+    await resetarDemo(env);
+    await auditar(env, u, 'demo.resetar', null, null, req);
+    return json({ ok: true });
+  }
   // senha provisória: nada além de trocar a senha
   if (u.trocar_senha) throw new HttpError('Troque sua senha provisória para continuar.', 403);
 
@@ -600,7 +613,11 @@ async function rotear(req, env) {
     return json(r.results);
   }
 
-  if (rec === 'upload' && m === 'POST') { exigir(u, 'produtos.editar'); return upload(req, env); }
+  if (rec === 'upload' && m === 'POST') {
+    exigir(u, 'produtos.editar');
+    if (visitanteDemo) throw new HttpError('Na demonstração o envio de fotos está desligado.', 403);
+    return upload(req, env);
+  }
 
   if (rec === 'importar' && m === 'POST') {
     exigir(u, 'produtos.editar');
@@ -850,6 +867,7 @@ async function agendado(env) {
 
 export default {
   async scheduled(event, env, ctx) {
+    if (ehDemo(env)) return ctx.waitUntil(resetarDemo(env)); // demonstração: volta aos dados originais
     ctx.waitUntil(agendado(env));
   },
   async fetch(req, env) {

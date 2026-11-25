@@ -132,6 +132,28 @@ Migrações futuras: `npm run db:remoto`.
 ### Fotos: KV ou R2
 O projeto usa o KV porque ele é gratuito e não pede cartão. O plano grátis tem 1 GB e mil gravações por dia, o que basta para um catálogo. Se você ativar o R2 no painel, troque o bloco `[[kv_namespaces]]` pelo `[[r2_buckets]]` comentado no `wrangler.toml`. O código aceita os dois.
 
+## Uma instalação por empresa
+
+O mesmo código atende várias empresas. Cada uma tem a própria instalação no `wrangler.toml`, com banco D1, fotos, segredos e domínio separados:
+
+| Instalação | Comando de deploy | Domínio | Banco |
+|---|---|---|---|
+| Joice Rosa (padrão) | `npx wrangler deploy` | joicerosa.infoservicos.com.br | `catalogo-db` |
+| Demonstração | `npx wrangler deploy --env demo` | demo.infoservicos.com.br | `catalogo-demo-db` |
+
+**Demonstração (Loja Modelo):** os produtos são fictícios e as ilustrações ficam em `public/demo/`. A Pix é uma chave fictícia, e há um login de visitante com papel Gerente (`demo@lojamodelo.com.br` / `Demo2026`). Os dados voltam ao original todo dia às 3h, pelo `seed-demo.sql`, ou pelo endpoint `POST /api/admin/demo/resetar`. O reset preserva os usuários e o WhatsApp da loja.
+
+**Novo cliente:**
+1. Crie o banco e o KV:
+   ```
+   npx wrangler d1 create catalogo-<cliente>-db
+   npx wrangler kv namespace create catalogo-<cliente>-imagens
+   ```
+2. Copie o bloco `[env.demo]` como `[env.<cliente>]` e troque o nome, os IDs e o domínio. Remova `vars` e `triggers` da demo e use o cron padrão de 10 minutos.
+3. Aplique as migrações: `npx wrangler d1 migrations apply catalogo-<cliente>-db --remote --env <cliente>`.
+4. Na Cloudflare, abra Workers & Pages → Create → Import a repository → `euzebionp/catalogo`, com o nome `catalogo-<cliente>` e o deploy `npx wrangler deploy --env <cliente>`.
+5. Crie o segredo `ADMIN_PASSWORD`, entre em `/admin`, crie o Administrador master e configure a loja.
+
 ## Usuários e permissões
 
 Cada pessoa entra no painel com o próprio e-mail e senha. As senhas são guardadas com PBKDF2-SHA256.

@@ -639,4 +639,15 @@ document.addEventListener('click', async (e) => {
   if (e.target.closest('[data-novo]')) editorProduto(null);
 });
 
+// demonstração: mostra o login de visitante
+fetch('/api/loja').then((r) => r.json()).then((j) => {
+  if (!j.demo) return;
+  const p = document.createElement('div');
+  p.className = 'secao'; p.style.margin = '0';
+  p.innerHTML = `<strong>Loja de demonstração</strong><p class="mini" style="margin:6px 0">Entre como visitante (papel Gerente). Os dados voltam ao original todo dia às 3h.</p>
+    <p class="mini" style="margin:0">E-mail: <code>${esc(j.demo.email)}</code> · Senha: <code>${esc(j.demo.senha)}</code></p>
+    <button type="button" class="btn sec" style="margin-top:8px">Entrar como visitante</button>`;
+  p.querySelector('button').onclick = () => { $('#email').value = j.demo.email; $('#senha').value = j.demo.senha; $('#form-login').requestSubmit(); };
+  $('#form-login').prepend(p);
+}).catch(() => {});
 if (token) iniciar(); else sair();

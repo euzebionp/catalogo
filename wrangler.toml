@@ -1,13 +1,35 @@
+# =====================================================================
+# Uma instalação por empresa, todas saindo deste mesmo código.
+#   Padrão (sem --env)  -> Joice Rosa (primeiro cliente)
+#   --env demo           -> loja de demonstração para apresentar a clientes
+# Novo cliente: copie o bloco [env.demo], troque nome, banco, KV e domínio.
+# =====================================================================
 name = "catalogo"
 main = "src/worker.js"
 compatibility_date = "2025-09-01"
+# domínio da Joice Rosa (instalação padrão)
+routes = [{ pattern = "joicerosa.infoservicos.com.br", custom_domain = true }]
 
-# Vitrine (/) e painel (/admin) são arquivos estáticos; /api e /img passam pelo Worker
 [assets]
 directory = "./public"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = ["/api/*", "/img/*"]
+
+[observability]
+enabled = true
+
+# seed-demo.sql é importado como texto pelo modo demonstração
+[[rules]]
+type = "Text"
+globs = ["**/*.sql"]
+fallthrough = true
+
+[triggers]
+# a cada 10 minutos: renova o token do TagPlus, processa a fila e busca produtos alterados
+crons = ["*/10 * * * *"]
+
+# ---------------------------------------------------------------- Joice Rosa (cliente 1)
 
 [[d1_databases]]
 binding = "DB"
@@ -15,23 +37,37 @@ database_name = "catalogo-db"
 database_id = "d86d0a84-5548-468f-a2ee-0d3858c076f6"
 migrations_dir = "migrations"
 
-# Fotos no KV (gratuito, sem cartão). Para usar R2, troque por:
-# [[r2_buckets]]
-# binding = "IMAGENS"
-# bucket_name = "catalogo-imagens"
 [[kv_namespaces]]
 binding = "IMAGENS_KV"
 id = "635962451a234bd3b09abab68b2b338b"
 
-[observability]
-enabled = true
+# ---------------------------------------------------------------- Demonstração
+[env.demo]
+name = "catalogo-demo"
+routes = [{ pattern = "demo.infoservicos.com.br", custom_domain = true }]
+vars = { DEMO = "1" }
 
-# Segredos (cadastrados no painel da Cloudflare, nunca neste arquivo):
-#   ADMIN_PASSWORD  -> senha do painel /admin
+[env.demo.assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/img/*"]
+
+[env.demo.triggers]
+# 06:00 UTC = 03:00 em Brasília: a demonstração volta aos dados originais
+crons = ["0 6 * * *"]
+
+[[env.demo.d1_databases]]
+binding = "DB"
+database_name = "catalogo-demo-db"
+database_id = "25ae0bf1-ee4c-4769-a2f0-f0551794b271"
+migrations_dir = "migrations"
+
+[[env.demo.kv_namespaces]]
+binding = "IMAGENS_KV"
+id = "fa1d52255a2b4c84805e11e638a4ade9"
+
+# Segredos de cada instalação (painel da Cloudflare, nunca neste arquivo):
+#   ADMIN_PASSWORD  -> senha mestra (só para criar o primeiro Administrador master)
 #   SESSION_SECRET  -> texto aleatório longo
-#   TAGPLUS_CLIENT_ID, TAGPLUS_CLIENT_SECRET -> app cadastrado em developers.tagplus.com.br
-#   TAGPLUS_WEBHOOK_SECRET -> mesmo valor do campo X-Hub-Secret do webhook no TagPlus
-
-[triggers]
-# a cada 10 minutos: renova o token do TagPlus, processa a fila e busca produtos alterados
-crons = ["*/10 * * * *"]
+#   TAGPLUS_CLIENT_ID, TAGPLUS_CLIENT_SECRET, TAGPLUS_WEBHOOK_SECRET -> integração TagPlus
