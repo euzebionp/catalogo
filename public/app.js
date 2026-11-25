@@ -44,7 +44,8 @@ function aplicarLoja() {
   $('#avisos').innerHTML = L.avisos.map((a) => `<span>${esc(a)}</span>`).join('');
   $('#marca').innerHTML = (L.logo ? `<img src="${esc(L.logo)}" alt="">` : '') +
     `<span><strong>${esc(L.nome)}</strong>${L.slogan ? `<small>${esc(L.slogan)}</small>` : ''}</span>`;
-  if (L.instagram) { $('#lnk-insta').href = 'https://instagram.com/' + encodeURIComponent(L.instagram); $('#lnk-insta').hidden = false; }
+  const insta = String(L.instagram || '').trim().replace(/^.*instagram\.com\//i, '').replace(/^@+/, '').split(/[/?#]/)[0];
+  if (/^[A-Za-z0-9._]{1,30}$/.test(insta)) { $('#lnk-insta').href = 'https://www.instagram.com/' + insta.toLowerCase() + '/'; $('#lnk-insta').hidden = false; }
   $('#lnk-wpp').href = 'https://wa.me/' + L.whatsapp;
   $('#rodape').innerHTML = `<p><strong>${esc(L.nome)}</strong></p>` +
     (L.endereco_loja ? `<p>${esc(L.endereco_loja)}</p>` : '') +

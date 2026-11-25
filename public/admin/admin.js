@@ -427,7 +427,7 @@ async function telaLoja() {
     </div></div>
     <div class="secao"><h3>Contato e atendimento</h3><div class="form-grid">
       ${inp('whatsapp', 'WhatsApp que recebe os pedidos', 'placeholder="(34) 99999-9999" required inputmode="tel"', 'c2')}
-      ${inp('instagram', 'Instagram (sem @)', '', 'c2')}
+      ${inp('instagram', 'Instagram (nome do perfil ou link, sem acentos)', '', 'c2')}
       ${inp('endereco_loja', 'Endereço da loja (retirada)', '', 'c4')}
       ${inp('horario', 'Horário de atendimento', 'placeholder="Seg a Sex 08:00–18:00"', 'c4')}
       ${inp('aviso_topo', 'Avisos da faixa do topo (separe com |)', 'placeholder="Frete grátis acima de R$ 150|Entrega no mesmo dia"', 'c4')}

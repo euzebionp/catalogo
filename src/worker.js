@@ -519,11 +519,24 @@ async function crud(req, env, nome, id) {
   return row ? json(row) : erro('Não encontrado', 404);
 }
 
+// Instagram: aceita "@perfil", "perfil" ou o link do perfil e guarda só o nome de usuário.
+// O Instagram só permite letras sem acento, números, ponto e sublinhado (até 30 caracteres).
+function usuarioInstagram(v) {
+  let u = texto(v, 200);
+  if (!u) return null;
+  const m = u.match(/instagram\.com\/([^/?#\s]+)/i);
+  if (m) u = m[1];
+  u = u.replace(/^@+/, '').trim();
+  if (!/^[A-Za-z0-9._]{1,30}$/.test(u))
+    throw new HttpError('Instagram inválido: use só o nome do perfil, sem acentos, espaços ou "ç" (letras, números, ponto e _). Ex.: minhaloja_oficial');
+  return u.toLowerCase();
+}
+
 const CONFIG_CAMPOS = {
   nome: (v) => texto(v, 80) || 'Minha Loja', slogan: (v) => texto(v, 150) || null, segmento: (v) => texto(v, 20) || 'misto',
   logo_key: (v) => texto(v, 300) || null, cor_primaria: (v) => (/^#[0-9a-f]{6}$/i.test(v) ? v : '#3b3fb6'),
   cor_destaque: (v) => (/^#[0-9a-f]{6}$/i.test(v) ? v : '#f39c12'), whatsapp: (v) => numeroWhats(v),
-  instagram: (v) => texto(v, 60).replace(/^@/, '') || null, endereco_loja: (v) => texto(v, 200) || null,
+  instagram: (v) => usuarioInstagram(v), endereco_loja: (v) => texto(v, 200) || null,
   horario: (v) => texto(v, 200) || null, aviso_topo: (v) => texto(v, 400) || null,
   pedido_minimo: (v) => Math.max(0, inteiro(v, 0)), permite_retirada: (v) => (v ? 1 : 0), permite_entrega: (v) => (v ? 1 : 0),
   pix_ativo: (v) => (v ? 1 : 0), pix_tipo: (v) => (['cpf', 'cnpj', 'email', 'telefone', 'aleatoria'].includes(v) ? v : null),
