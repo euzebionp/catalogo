@@ -1,6 +1,7 @@
 // Catálogo eletrônico — API (Cloudflare Worker + D1 + R2)
 import { brCode } from './pix.js';
 import { importarLinhas } from './importar.js';
+import { PAPEIS, pode, permissoes, gerarHash, conferirSenha, validarSenha, auditar, bloqueado, registrarFalha, limparFalhas } from './usuarios.js';
 import { configurado as tagplusConfigurado, urlAutorizacao, trocarCodigo, lerChave, gravarChave, registrar, api as tagplusApi, renovarToken } from './tagplus/cliente.js';
 import { enfileirar, processarFila, sincronizarProdutos, receberWebhook } from './tagplus/sync.js';
 
@@ -66,7 +67,9 @@ const fotos = {
 };
 
 // ---------------------------------------------------------------- autenticação admin
-// Senha em segredo do Worker (ADMIN_PASSWORD). Token = expiração.assinaturaHMAC
+// Cada pessoa entra com e-mail e senha (tabela usuarios). Token = usuario.versao.expiração.assinaturaHMAC
+// A senha mestra (ADMIN_PASSWORD) só abre o painel enquanto não existir nenhum Administrador master ativo:
+// serve para criar o primeiro master e depois deixa de funcionar.
 async function hmac(secret, msg) {
   const k = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret),
     { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
@@ -81,15 +84,119 @@ function iguais(a, b) {
 }
 const segredo = (env) => env.SESSION_SECRET || env.ADMIN_PASSWORD;
 
-async function criarToken(env) {
-  const exp = String(Date.now() + 1000 * 60 * 60 * 12); // 12 h
-  return exp + '.' + (await hmac(segredo(env), exp));
+async function criarToken(env, uid, versao) {
+  const corpo = `${uid}.${versao}.${Date.now() + 1000 * 60 * 60 * 12}`; // 12 h
+  return corpo + '.' + (await hmac(segredo(env), 'sessao' + corpo));
 }
+const mastersAtivos = (env) => env.DB.prepare(`SELECT COUNT(*) n FROM usuarios WHERE ativo = 1 AND papel = 'master'`).first('n');
+const MESTRE = { id: 0, nome: 'Configuração inicial (senha mestra)', email: null, papel: 'master', mestre: true, trocar_senha: 0 };
+
 async function exigirAdmin(req, env) {
   const tok = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
-  const [exp, sig] = tok.split('.');
-  if (!exp || !sig || +exp < Date.now()) throw new HttpError('Sessão expirada. Entre novamente.', 401);
-  if (!iguais(sig, await hmac(segredo(env), exp))) throw new HttpError('Não autorizado', 401);
+  const [uid, versao, exp, sig] = tok.split('.');
+  if (!sig || +exp < Date.now()) throw new HttpError('Sessão expirada. Entre novamente.', 401);
+  if (!iguais(sig, await hmac(segredo(env), `sessao${uid}.${versao}.${exp}`))) throw new HttpError('Sessão expirada. Entre novamente.', 401);
+  if (+uid === 0) {
+    if (await mastersAtivos(env)) throw new HttpError('A senha mestra foi desativada. Entre com seu e-mail.', 401);
+    return MESTRE;
+  }
+  const u = await env.DB.prepare('SELECT id, nome, email, papel, ativo, trocar_senha, versao_sessao FROM usuarios WHERE id = ?').bind(+uid).first();
+  if (!u || !u.ativo || u.versao_sessao !== +versao) throw new HttpError('Sessão encerrada. Entre novamente.', 401);
+  return u;
+}
+function exigir(u, acao) {
+  if (!pode(u.papel, acao)) throw new HttpError('Seu usuário não tem permissão para isso.', 403);
+}
+const publicoUsuario = (u) => ({ id: u.id, nome: u.nome, email: u.email, papel: u.papel, papel_nome: PAPEIS[u.papel],
+  ativo: !!u.ativo, trocar_senha: !!u.trocar_senha, ultimo_acesso: u.ultimo_acesso, criado_em: u.criado_em });
+
+async function login(req, env) {
+  const b = await req.json().catch(() => ({}));
+  const email = texto(b.email, 120).toLowerCase();
+  const senha = typeof b.senha === 'string' ? b.senha : '';
+  const ip = req.headers.get('cf-connecting-ip') || 'local';
+  const chaves = [`ip:${ip}`, ...(email ? [`email:${email}`] : [])];
+  await new Promise((r) => setTimeout(r, 300));
+  if (await bloqueado(env, chaves)) return erro('Muitas tentativas. Aguarde 15 minutos e tente de novo.', 429);
+
+  if (!email) {
+    // primeiro acesso: só com a senha mestra e só enquanto não houver Administrador master cadastrado
+    if (await mastersAtivos(env)) return erro('Informe seu e-mail.', 400);
+    if (!env.ADMIN_PASSWORD) return erro('Defina o segredo ADMIN_PASSWORD no Worker.', 500);
+    if (!iguais(await hmac('cmp', senha), await hmac('cmp', env.ADMIN_PASSWORD))) { await registrarFalha(env, chaves); return erro('Senha incorreta.', 401); }
+    await limparFalhas(env, chaves);
+    await auditar(env, MESTRE, 'login.mestre', null, null, req);
+    return json({ token: await criarToken(env, 0, 0) });
+  }
+  const u = await env.DB.prepare('SELECT * FROM usuarios WHERE email = ?').bind(email).first();
+  if (!u || !u.ativo || !(await conferirSenha(senha, u.senha_hash))) { await registrarFalha(env, chaves); return erro('E-mail ou senha incorretos.', 401); }
+  await limparFalhas(env, chaves);
+  await env.DB.prepare(`UPDATE usuarios SET ultimo_acesso = datetime('now') WHERE id = ?`).bind(u.id).run();
+  await auditar(env, u, 'login', null, null, req);
+  return json({ token: await criarToken(env, u.id, u.versao_sessao) });
+}
+
+// ---------------------------------------------------------------- usuários (só o dono)
+async function rotasUsuarios(req, env, u, id) {
+  const m = req.method;
+  if (m === 'GET') return json((await env.DB.prepare('SELECT * FROM usuarios ORDER BY ativo DESC, nome').all()).results.map(publicoUsuario));
+  const b = await req.json().catch(() => ({}));
+  const papel = b.papel in PAPEIS ? b.papel : null;
+
+  if (m === 'POST' && !id) {
+    const nome = texto(b.nome, 80), email = texto(b.email, 120).toLowerCase();
+    if (nome.length < 2) throw new HttpError('Informe o nome.');
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError('E-mail inválido.');
+    if (!papel) throw new HttpError('Escolha o papel.');
+    if (u.mestre && papel !== 'master') throw new HttpError('Crie primeiro o Administrador master.');
+    if (papel === 'master') exigir(u, 'usuarios.master');
+    const ruim = validarSenha(b.senha); if (ruim) throw new HttpError(ruim);
+    if (await env.DB.prepare('SELECT 1 FROM usuarios WHERE email = ?').bind(email).first()) throw new HttpError('Já existe um usuário com esse e-mail.');
+    const novo = await env.DB.prepare(`INSERT INTO usuarios (nome, email, senha_hash, papel, trocar_senha) VALUES (?,?,?,?,?) RETURNING *`)
+      .bind(nome, email, await gerarHash(b.senha), papel, u.mestre || b.trocar_senha === false ? 0 : 1).first();
+    await auditar(env, u, 'usuario.criar', email, { papel }, req);
+    return json(publicoUsuario(novo), 201);
+  }
+  const alvo = id && (await env.DB.prepare('SELECT * FROM usuarios WHERE id = ?').bind(id).first());
+  if (!alvo) throw new HttpError('Usuário não encontrado.', 404);
+
+  if (m === 'PUT') {
+    const ativo = b.ativo === undefined ? alvo.ativo : b.ativo ? 1 : 0;
+    const novoPapel = papel || alvo.papel;
+    // conta master só é alterada por outro master
+    if (alvo.papel === 'master' || novoPapel === 'master') exigir(u, 'usuarios.master');
+    // nunca deixar o sistema sem um Administrador master ativo
+    if (alvo.papel === 'master' && alvo.ativo && (novoPapel !== 'master' || !ativo) && (await mastersAtivos(env)) <= 1)
+      throw new HttpError('É preciso manter pelo menos um Administrador master ativo.');
+    let hash = alvo.senha_hash, trocar = alvo.trocar_senha, versao = alvo.versao_sessao;
+    if (b.senha) {
+      const ruim = validarSenha(b.senha); if (ruim) throw new HttpError(ruim);
+      hash = await gerarHash(b.senha); trocar = 1; versao++;
+    }
+    if (novoPapel !== alvo.papel || ativo !== alvo.ativo) versao++; // derruba sessões abertas
+    const nome = texto(b.nome, 80) || alvo.nome;
+    const r = await env.DB.prepare(`UPDATE usuarios SET nome = ?, papel = ?, ativo = ?, senha_hash = ?, trocar_senha = ?, versao_sessao = ?,
+      atualizado_em = datetime('now') WHERE id = ? RETURNING *`).bind(nome, novoPapel, ativo, hash, trocar, versao, id).first();
+    await auditar(env, u, 'usuario.editar', alvo.email, {
+      ...(novoPapel !== alvo.papel ? { papel: [alvo.papel, novoPapel] } : {}),
+      ...(ativo !== alvo.ativo ? { ativo: !!ativo } : {}), ...(b.senha ? { senha: 'redefinida' } : {}),
+    }, req);
+    return json(publicoUsuario(r));
+  }
+  return erro('Rota não encontrada.', 404);
+}
+
+async function trocarMinhaSenha(req, env, u) {
+  if (u.mestre) throw new HttpError('A senha mestra é trocada no segredo ADMIN_PASSWORD da Cloudflare.');
+  const b = await req.json().catch(() => ({}));
+  const atual = await env.DB.prepare('SELECT senha_hash FROM usuarios WHERE id = ?').bind(u.id).first('senha_hash');
+  if (!(await conferirSenha(b.atual || '', atual))) throw new HttpError('Senha atual incorreta.');
+  const ruim = validarSenha(b.nova); if (ruim) throw new HttpError(ruim);
+  if (b.nova === b.atual) throw new HttpError('A nova senha precisa ser diferente da atual.');
+  const v = await env.DB.prepare(`UPDATE usuarios SET senha_hash = ?, trocar_senha = 0, versao_sessao = versao_sessao + 1,
+    atualizado_em = datetime('now') WHERE id = ? RETURNING versao_sessao`).bind(await gerarHash(b.nova), u.id).first('versao_sessao');
+  await auditar(env, u, 'senha.trocar', u.email, null, req);
+  return json({ token: await criarToken(env, u.id, v) }); // sessão nova; as outras caem
 }
 
 // ---------------------------------------------------------------- leitura do catálogo
@@ -468,62 +575,104 @@ async function rotear(req, env) {
   }
 
   // ---- admin
-  if (path === '/api/admin/login' && m === 'POST') {
-    if (!env.ADMIN_PASSWORD) return erro('Defina o segredo ADMIN_PASSWORD no Worker.', 500);
-    const { senha } = await req.json().catch(() => ({}));
-    await new Promise((r) => setTimeout(r, 400)); // freia tentativas em massa
-    if (typeof senha !== 'string' || !iguais(await hmac('cmp', senha), await hmac('cmp', env.ADMIN_PASSWORD)))
-      return erro('Senha incorreta.', 401);
-    return json({ token: await criarToken(env) });
-  }
+  if (path === '/api/admin/login' && m === 'POST') return login(req, env);
   if (!path.startsWith('/api/admin/')) return null;
-  await exigirAdmin(req, env);
+  const u = await exigirAdmin(req, env);
 
   const seg = path.split('/').slice(3); // [recurso, id?]
   const [rec, idStr] = seg;
   const id = inteiro(idStr);
 
-  if (rec === 'upload' && m === 'POST') return upload(req, env);
+  // quem eu sou e o que posso fazer
+  if (rec === 'eu' && m === 'GET') {
+    return json({ ...(u.mestre ? MESTRE : publicoUsuario(u)), papel_nome: PAPEIS[u.papel], permissoes: permissoes(u.papel),
+      configurar_usuarios: !!u.mestre });
+  }
+  if (rec === 'minha-senha' && m === 'POST') return trocarMinhaSenha(req, env, u);
+  // senha provisória: nada além de trocar a senha
+  if (u.trocar_senha) throw new HttpError('Troque sua senha provisória para continuar.', 403);
 
-  if (rec === 'importar' && m === 'POST') {
-    const b = await req.json().catch(() => ({}));
-    try { return json(await importarLinhas(env, b.linhas, { atualizarFotos: b.atualizar_fotos !== false })); }
-    catch (e) { throw new HttpError(e.message); }
+  if (rec === 'usuarios') { exigir(u, 'usuarios'); return rotasUsuarios(req, env, u, id); }
+  if (rec === 'auditoria' && m === 'GET') {
+    exigir(u, 'auditoria');
+    const uid = inteiro(url.searchParams.get('usuario'));
+    const r = await env.DB.prepare(`SELECT * FROM auditoria ${uid ? 'WHERE usuario_id = ?' : ''} ORDER BY id DESC LIMIT 300`).bind(...(uid ? [uid] : [])).all();
+    return json(r.results);
   }
 
-  if (rec === 'tagplus') return rotasTagplus(req, env, url, seg.slice(1));
+  if (rec === 'upload' && m === 'POST') { exigir(u, 'produtos.editar'); return upload(req, env); }
+
+  if (rec === 'importar' && m === 'POST') {
+    exigir(u, 'produtos.editar');
+    const b = await req.json().catch(() => ({}));
+    try {
+      const r = await importarLinhas(env, b.linhas, { atualizarFotos: b.atualizar_fotos !== false });
+      await auditar(env, u, 'produtos.importar', `${r.produtos} produto(s)`, { criados: r.criados, atualizados: r.atualizados, erros: r.erros.length }, req);
+      return json(r);
+    } catch (e) { throw new HttpError(e.message); }
+  }
+
+  if (rec === 'tagplus') { exigir(u, 'integracao'); return rotasTagplus(req, env, url, seg.slice(1), u); }
 
   if (rec === 'config') {
     if (m === 'GET') return json(await getConfig(env));
     if (m === 'PUT') {
+      exigir(u, 'loja.editar');
       const b = await req.json();
+      const antes = await getConfig(env);
       const ks = Object.keys(CONFIG_CAMPOS).filter((k) => k in b);
       if (ks.length) await env.DB.prepare(`UPDATE loja_config SET ${ks.map((k) => k + '=?').join(',')}, atualizado_em=datetime('now') WHERE id = 1`)
         .bind(...ks.map((k) => CONFIG_CAMPOS[k](b[k]))).run();
-      return json(await getConfig(env));
+      const depois = await getConfig(env);
+      const mudou = ks.filter((k) => String(antes[k] ?? '') !== String(depois[k] ?? ''));
+      if (mudou.length) await auditar(env, u, 'loja.editar', 'configurações', { campos: mudou }, req);
+      return json(depois);
     }
   }
 
   if (rec === 'produtos') {
-    if (m === 'GET' && !id) return json(await carregarProdutos(env, { somenteAtivos: false }));
+    exigir(u, 'produtos.ver');
+    const semCusto = (p) => (pode(u.papel, 'produtos.custo') ? p : { ...p, custo: undefined });
+    if (m === 'GET' && !id) return json((await carregarProdutos(env, { somenteAtivos: false })).map(semCusto));
     if (m === 'GET') {
       const p = (await carregarProdutos(env, { somenteAtivos: false, id }))[0];
-      return p ? json(p) : erro('Produto não encontrado.', 404);
+      return p ? json(semCusto(p)) : erro('Produto não encontrado.', 404);
     }
-    if (m === 'POST' && !id) return json(await salvarProduto(env, null, await req.json()), 201);
-    if (m === 'PUT' && id) return json(await salvarProduto(env, id, await req.json()));
+    exigir(u, 'produtos.editar');
+    if (m === 'POST' && !id) {
+      const p = await salvarProduto(env, null, await req.json());
+      await auditar(env, u, 'produto.criar', `produto ${p.id}`, { nome: p.nome, preco: p.preco }, req);
+      return json(p, 201);
+    }
+    if (m === 'PUT' && id) {
+      const antes = await env.DB.prepare('SELECT nome, preco, estoque, ativo FROM produtos WHERE id = ?').bind(id).first();
+      const p = await salvarProduto(env, id, await req.json());
+      const dif = antes ? Object.fromEntries(['nome', 'preco', 'estoque'].filter((k) => antes[k] !== p[k]).map((k) => [k, [antes[k], p[k]]])) : {};
+      if (antes && !!antes.ativo !== p.ativo) dif.ativo = p.ativo;
+      await auditar(env, u, 'produto.editar', `produto ${id}`, { nome: p.nome, ...dif }, req);
+      return json(p);
+    }
     if (m === 'DELETE' && id) {
+      const nome = await env.DB.prepare('SELECT nome FROM produtos WHERE id = ?').bind(id).first('nome');
       const keys = (await env.DB.prepare('SELECT r2_key FROM produto_imagens WHERE produto_id = ?').bind(id).all())
         .results.map((r) => r.r2_key).filter((k) => !/^https?:/.test(k));
       await env.DB.prepare('DELETE FROM produtos WHERE id = ?').bind(id).run();
       await fotos.del(env, keys);
+      await auditar(env, u, 'produto.excluir', `produto ${id}`, { nome }, req);
       return json({ ok: true });
     }
   }
 
-  if (rec in TABELAS) return crud(req, env, rec, id);
+  if (rec in TABELAS) {
+    if (m !== 'GET') exigir(u, 'cadastros.editar');
+    const r = await crud(req, env, rec, id);
+    if (m !== 'GET' && r.ok) await auditar(env, u, `${rec}.${m === 'POST' ? 'criar' : m === 'PUT' ? 'editar' : 'excluir'}`, id ? `${rec} ${id}` : rec, null, req);
+    return r;
+  }
 
   if (rec === 'pedidos') {
+    exigir(u, 'pedidos.ver');
+    const codigoPedido = async () => (await env.DB.prepare('SELECT codigo FROM pedidos WHERE id = ?').bind(id).first('codigo')) || `pedido ${id}`;
     if (m === 'GET' && !id) {
       const st = url.searchParams.get('status');
       const r = await env.DB.prepare(`SELECT p.*, (SELECT COUNT(*) FROM pedido_itens i WHERE i.pedido_id = p.id) AS qtd_itens
@@ -538,22 +687,28 @@ async function rotear(req, env) {
       return p.results[0] ? json({ ...p.results[0], itens: itens.results }) : erro('Pedido não encontrado.', 404);
     }
     if (m === 'POST' && seg[2] === 'enviar-erp') {
+      exigir(u, 'pedidos.erp');
       exigirTagplus(env);
+      await auditar(env, u, 'pedido.enviar_erp', await codigoPedido(), null, req);
       await env.DB.prepare(`UPDATE pedidos SET erp_status = 'pendente' WHERE id = ?`).bind(id).run();
       await enfileirar(env, 'enviar_pedido', id);
       return json({ ok: true, fila: await processarFila(env, 5) });
     }
     if (m === 'POST' && seg[2] === 'emitir-nota') {
+      exigir(u, 'pedidos.erp');
       exigirTagplus(env);
       const { tipo } = await req.json().catch(() => ({}));
+      await auditar(env, u, 'pedido.emitir_nota', await codigoPedido(), { tipo: tipo === 'nfe' ? 'nfe' : 'nfce' }, req);
       await env.DB.prepare(`UPDATE pedidos SET nf_status = 'solicitada', nf_erro = NULL WHERE id = ?`).bind(id).run();
       await enfileirar(env, 'emitir_nota', id, { tipo: tipo === 'nfe' ? 'nfe' : 'nfce' });
       return json({ ok: true, fila: await processarFila(env, 5) });
     }
     if (m === 'PUT') {
+      exigir(u, 'pedidos.status');
       const { status } = await req.json();
       const atual = await env.DB.prepare('SELECT status FROM pedidos WHERE id = ?').bind(id).first('status');
       if (!atual) return erro('Pedido não encontrado.', 404);
+      if (status !== atual) await auditar(env, u, 'pedido.status', await codigoPedido(), { de: atual, para: status }, req);
       const st = [env.DB.prepare(`UPDATE pedidos SET status = ?, atualizado_em = datetime('now') WHERE id = ?`).bind(status, id)];
       // cancelou → devolve estoque; reativou → baixa de novo
       if ((status === 'cancelado') !== (atual === 'cancelado')) {
@@ -614,7 +769,8 @@ const OPCOES_PADRAO = {
   formas_pagamento: {},             // { pix_chave: <id TagPlus>, cartao: <id>, ... }
 };
 
-async function rotasTagplus(req, env, url, [acao]) {
+async function rotasTagplus(req, env, url, [acao], u) {
+  if (req.method !== 'GET' && acao) await auditar(env, u, `integracao.${acao}`, 'TagPlus', null, req);
   const m = req.method;
   if (acao === 'status' && m === 'GET') {
     const [token, conta, opcoes, desde, fila, log] = await Promise.all([
@@ -635,6 +791,7 @@ async function rotasTagplus(req, env, url, [acao]) {
   }
   exigirTagplus(env);
   if (acao === 'conectar' && m === 'GET') {
+    await auditar(env, u, 'integracao.conectar', 'TagPlus', null, req);
     const exp = String(Date.now() + 15 * 60 * 1000);
     return json({ url: urlAutorizacao(env, exp + '.' + (await hmac(segredo(env), 'tagplus' + exp))) });
   }

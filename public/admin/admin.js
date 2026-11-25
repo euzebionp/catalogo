@@ -15,7 +15,8 @@ const data = (s) => new Date(s.replace(' ', 'T') + 'Z').toLocaleString('pt-BR', 
 
 let token = null;
 try { token = sessionStorage.getItem('adm_token'); } catch {}
-const S = { aba: 'pedidos', cats: [], produtos: [], busca: '', filtroStatus: '' };
+const S = { aba: 'pedidos', cats: [], produtos: [], busca: '', filtroStatus: '', eu: null };
+const pode = (acao) => !!S.eu?.permissoes?.includes(acao);
 
 const STATUS = { novo: 'Novo', confirmado: 'Confirmado', pago: 'Pago', preparando: 'Preparando', saiu: 'Saiu p/ entrega', entregue: 'Entregue', cancelado: 'Cancelado' };
 const PAG = { pix_chave: 'Pix (chave)', pix_atendente: 'Pix (atendente)', cartao: 'Cartão na entrega', dinheiro: 'Dinheiro' };
@@ -27,7 +28,7 @@ async function api(path, opt = {}) {
     body: opt.body && !(opt.body instanceof FormData) ? JSON.stringify(opt.body) : opt.body,
   });
   const j = await r.json().catch(() => ({}));
-  if (r.status === 401) { sair(); throw new Error(j.erro || 'Sessão expirada'); }
+  if (r.status === 401) { sair(); const el = $('#erro-login'); el.textContent = j.erro || 'Sessão expirada'; el.hidden = false; throw new Error(j.erro || 'Sessão expirada'); }
   if (!r.ok) throw new Error(j.erro || 'Erro ' + r.status);
   return j;
 }
@@ -41,19 +42,88 @@ function sair() { token = null; try { sessionStorage.removeItem('adm_token'); } 
 $('#form-login').onsubmit = async (e) => {
   e.preventDefault();
   const el = $('#erro-login'); el.hidden = true;
-  const r = await fetch('/api/admin/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ senha: $('#senha').value }) });
+  const r = await fetch('/api/admin/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: $('#email').value.trim(), senha: $('#senha').value }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { el.textContent = j.erro || 'Falha no login'; el.hidden = false; return; }
-  token = j.token; try { sessionStorage.setItem('adm_token', token); } catch {}
+  guardarToken(j.token); $('#senha').value = '';
   iniciar();
 };
+function guardarToken(t) { token = t; try { sessionStorage.setItem('adm_token', t); } catch {} }
 $('#sair').onclick = sair;
+$('#minha-senha').onclick = () => trocarSenha(false);
+
+// troca de senha (obrigatória quando a senha é provisória)
+function trocarSenha(obrigatoria) {
+  const dlg = $('#dlg');
+  dlg.innerHTML = `<form class="ped" id="f-senha"><h3>${obrigatoria ? 'Crie sua senha' : 'Trocar minha senha'}</h3>
+    ${obrigatoria ? '<p class="mini">Sua senha atual é provisória. Escolha uma senha só sua para continuar.</p>' : ''}
+    <div class="campo"><label>Senha atual</label><input type="password" name="atual" autocomplete="current-password" required></div>
+    <div class="campo"><label>Nova senha</label><input type="password" name="nova" autocomplete="new-password" minlength="8" required></div>
+    <div class="campo"><label>Repita a nova senha</label><input type="password" name="nova2" autocomplete="new-password" required></div>
+    <p class="mini">Pelo menos 8 caracteres, com letras e números.</p>
+    <p class="erro-msg" id="e-senha" hidden></p>
+    <button class="btn">Salvar senha</button>${obrigatoria ? '' : '<button type="button" class="btn sec" data-x>Cancelar</button>'}</form>`;
+  dlg.onclick = (e) => { if (e.target.matches('[data-x]') || (!obrigatoria && e.target === dlg)) dlg.close(); };
+  dlg.oncancel = (e) => { if (obrigatoria) e.preventDefault(); };
+  $('#f-senha').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.target)), er = $('#e-senha');
+    if (f.nova !== f.nova2) { er.textContent = 'As senhas não conferem.'; er.hidden = false; return; }
+    try {
+      const r = await api('minha-senha', { method: 'POST', body: { atual: f.atual, nova: f.nova } });
+      guardarToken(r.token); dlg.close(); toast('Senha alterada');
+      if (obrigatoria) iniciar();
+    } catch (x) { er.textContent = x.message; er.hidden = false; }
+  };
+  dlg.showModal();
+}
+
+// primeiro acesso: criar o Administrador master
+function telaConfiguracaoInicial() {
+  document.querySelectorAll('#abas button').forEach((b) => (b.hidden = true));
+  $('#minha-senha').hidden = true;
+  C().onclick = null;
+  C().innerHTML = `<div class="secao" style="max-width:560px;margin:24px auto">
+    <h2>Criar o Administrador master</h2>
+    <p>Você entrou com a senha mestra. Crie agora a conta do <strong>Administrador master</strong>: ela gerencia tudo, inclusive os outros usuários. Depois disso a senha mestra deixa de funcionar e cada pessoa entra com o próprio e-mail.</p>
+    <form id="f-master">
+      <div class="campo"><label>Nome</label><input name="nome" required></div>
+      <div class="campo"><label>E-mail</label><input name="email" type="email" autocomplete="username" required></div>
+      <div class="campo"><label>Senha</label><input name="senha" type="password" autocomplete="new-password" minlength="8" required></div>
+      <div class="campo"><label>Repita a senha</label><input name="senha2" type="password" autocomplete="new-password" required></div>
+      <p class="mini">Pelo menos 8 caracteres, com letras e números.</p>
+      <p class="erro-msg" id="e-master" hidden></p>
+      <button class="btn">Criar e entrar</button>
+    </form></div>`;
+  $('#f-master').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.target)), er = $('#e-master');
+    if (f.senha !== f.senha2) { er.textContent = 'As senhas não conferem.'; er.hidden = false; return; }
+    try {
+      await api('usuarios', { method: 'POST', body: { nome: f.nome, email: f.email, senha: f.senha, papel: 'master' } });
+      const r = await fetch('/api/admin/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: f.email, senha: f.senha }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.erro || 'Falha ao entrar');
+      guardarToken(j.token); toast('Administrador master criado');
+      iniciar();
+    } catch (x) { er.textContent = x.message; er.hidden = false; }
+  };
+}
 
 async function iniciar() {
   $('#tela-login').hidden = true; $('#app').hidden = false;
   try {
+    S.eu = await api('eu');
+    $('#eu-nome').textContent = `${S.eu.nome} · ${S.eu.papel_nome}`;
+    $('#minha-senha').hidden = !!S.eu.configurar_usuarios;
+    if (S.eu.trocar_senha) { document.querySelectorAll('#abas button').forEach((b) => (b.hidden = true)); C().innerHTML = ''; return trocarSenha(true); }
     const cfg = await api('config');
     $('#adm-nome').textContent = cfg.nome;
+    if (S.eu.configurar_usuarios) return telaConfiguracaoInicial();
+    // mostra só as abas que o papel permite
+    const ABAS = { pedidos: 'pedidos.ver', produtos: 'produtos.ver', categorias: 'cadastros.editar', regioes: 'cadastros.editar', loja: 'loja.editar', integracao: 'integracao', usuarios: 'usuarios' };
+    document.querySelectorAll('#abas button').forEach((b) => (b.hidden = !pode(ABAS[b.dataset.aba])));
+    if (!pode(ABAS[S.aba])) S.aba = 'pedidos';
     document.documentElement.style.setProperty('--pri', cfg.cor_primaria);
     document.documentElement.style.setProperty('--dest', cfg.cor_destaque);
     S.cats = await api('categorias');
@@ -73,7 +143,7 @@ function abrirAba(a) {
   S.aba = a;
   C().onclick = null;
   document.querySelectorAll('#abas button').forEach((b) => b.classList.toggle('on', b.dataset.aba === a));
-  ({ pedidos: telaPedidos, produtos: telaProdutos, categorias: () => telaCrud('categorias'), regioes: () => telaCrud('regioes'), loja: telaLoja, integracao: telaIntegracao }[a])();
+  ({ pedidos: telaPedidos, produtos: telaProdutos, categorias: () => telaCrud('categorias'), regioes: () => telaCrud('regioes'), loja: telaLoja, integracao: telaIntegracao, usuarios: telaUsuarios }[a])();
 }
 const C = () => $('#conteudo');
 
@@ -107,7 +177,7 @@ async function abrirPedido(id) {
     <div><strong>${esc(p.cliente_nome)}</strong> · <a href="https://wa.me/${tel.length <= 11 ? '55' + tel : tel}" target="_blank" rel="noopener">${fone(p.cliente_telefone)} (WhatsApp)</a></div>
     <div>${p.recebimento === 'entrega' ? `<strong>Entrega</strong>${p.regiao_nome ? ' · ' + esc(p.regiao_nome) : ''}<br>${esc(p.endereco)}${p.referencia ? '<br>Ref.: ' + esc(p.referencia) : ''}` : '<strong>Retirada na loja</strong>'}</div>
     ${p.cliente_cpf_cnpj ? `<div><strong>CPF/CNPJ na nota:</strong> ${esc(p.cliente_cpf_cnpj)}</div>` : ''}
-    <div class="secao" style="margin:0;padding:12px 14px"><strong>TagPlus</strong>
+    <div class="secao" id="bloco-erp" style="margin:0;padding:12px 14px"><strong>TagPlus</strong>
       <div class="mini">Pedido no ERP: ${p.tagplus_pedido_id ? '#' + p.tagplus_pedido_id : p.erp_status === 'pendente' ? 'na fila' : p.erp_status === 'erro' ? '<span class="tag cancelado">erro (veja Integração)</span>' : 'não enviado'}
       · Nota: ${p.nf_status ? `${(p.nf_tipo || '').toUpperCase()} ${p.nf_numero ? 'nº ' + esc(p.nf_numero) : ''} <span class="tag ${p.nf_status === 'autorizada' ? 'entregue' : p.nf_status === 'rejeitada' ? 'cancelado' : 'novo'}">${esc(p.nf_status)}</span>` : 'não emitida'}
       ${p.nf_url ? ` · <a href="${esc(p.nf_url)}" target="_blank" rel="noopener">DANFE</a>` : ''}${p.nf_erro ? `<div class="mini" style="color:var(--err)">${esc(p.nf_erro)}</div>` : ''}</div>
@@ -143,15 +213,16 @@ async function abrirPedido(id) {
       catch (er) { falha(er); }
     }
   };
+  if (!pode('pedidos.erp')) $('#bloco-erp')?.remove();
   dlg.showModal();
 }
 
 // --------------------------------------------------------------- produtos
 async function telaProdutos() {
-  C().innerHTML = `<div class="cab"><h2>Produtos</h2><input id="f-busca" type="search" placeholder="Buscar…" value="${esc(S.busca)}"><label class="btn sec" style="width:auto;cursor:pointer">Importar planilha<input type="file" id="imp-arq" accept=".xlsx,.xls,.csv" hidden></label><a class="lnk" href="/modelo-importacao-catalogo.xlsx" download>Baixar modelo</a><button class="btn" data-novo>+ Novo produto</button></div>
+  C().innerHTML = `<div class="cab"><h2>Produtos</h2><input id="f-busca" type="search" placeholder="Buscar…" value="${esc(S.busca)}">${pode('produtos.editar') ? '<label class="btn sec" style="width:auto;cursor:pointer">Importar planilha<input type="file" id="imp-arq" accept=".xlsx,.xls,.csv" hidden></label><a class="lnk" href="/modelo-importacao-catalogo.xlsx" download>Baixar modelo</a><button class="btn" data-novo>+ Novo produto</button>' : ''}</div>
     <div class="painel"><p class="vazio">Carregando…</p></div>`;
   $('#f-busca').oninput = (e) => { S.busca = e.target.value; listaProdutos(); };
-  $('#imp-arq').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importarPlanilha(f); };
+  if ($('#imp-arq')) $('#imp-arq').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importarPlanilha(f); };
   try { S.produtos = await api('produtos'); listaProdutos(); } catch (e) { falha(e); }
 }
 function listaProdutos() {
@@ -196,7 +267,7 @@ function editorProduto(p) {
 
     <div class="secao"><h3>Preço e venda</h3><div class="form-grid">
       <div class="campo"><label>Preço (R$) *</label><input name="preco" value="${reais(p.preco)}" inputmode="decimal" placeholder="0,00" required></div>
-      <div class="campo"><label>Custo total (R$)</label><input name="custo" value="${reais(p.custo)}" inputmode="decimal" placeholder="da planilha"></div>
+      ${pode('produtos.custo') ? `<div class="campo"><label>Custo total (R$)</label><input name="custo" value="${reais(p.custo)}" inputmode="decimal" placeholder="da planilha"></div>` : ''}
       <div class="campo"><label>Preço "de" (R$)</label><input name="preco_antigo" value="${reais(p.preco_antigo)}" inputmode="decimal" placeholder="opcional"></div>
       <div class="campo"><label>Unidade</label><input name="unidade" value="${esc(p.unidade)}" list="unids"><datalist id="unids"><option>un</option><option>cx</option><option>par</option><option>kit</option><option>pct</option><option>kg</option><option>fardo</option></datalist></div>
       <div class="campo"><label>Estoque</label><input name="estoque" value="${p.estoque ?? ''}" inputmode="numeric" placeholder="não controla"></div>
@@ -213,10 +284,11 @@ function editorProduto(p) {
     <div class="secao"><h3>Especificações</h3><p class="mini">Aparecem em tabela na página do produto.</p>
       <div class="linhas" id="specs">${specs()}</div><button type="button" class="btn sec add-lin" data-adds style="width:auto">+ Especificação</button></div>
 
-    <div class="salvar-bar">${p.id ? '<button type="button" class="lnk perigo" data-excluir>Excluir produto</button>' : ''}<button class="btn" id="btn-salvar">Salvar produto</button></div>
+    ${pode('produtos.editar') ? `<div class="salvar-bar">${p.id ? '<button type="button" class="lnk perigo" data-excluir>Excluir produto</button>' : ''}<button class="btn" id="btn-salvar">Salvar produto</button></div>` : '<p class="mini">Somente consulta: seu usuário não altera produtos.</p>'}
   </form>`;
 
   const form = $('#fp');
+  if (!pode('produtos.editar')) form.querySelectorAll('input,select,textarea,button,label.foto-add').forEach((el) => { el.disabled = true; if (el.matches('label.foto-add,[data-addv],[data-adds],[data-grade],.x,.bar button')) el.hidden = true; });
   const redrawF = () => { $('#fotos').innerHTML = fotos(); };
   const redrawV = () => { $('#vars').innerHTML = vars(); };
   const redrawS = () => { $('#specs').innerHTML = specs(); };
@@ -489,6 +561,73 @@ async function telaIntegracao() {
       try { const r = await api(`tagplus/diagnostico?recurso=${$('#dg-rec').value}${$('#dg-id').value ? '&id=' + $('#dg-id').value : ''}`); out.textContent = JSON.stringify(r.dados, null, 2); }
       catch (er) { out.textContent = er.message; }
     }
+  };
+}
+
+
+// --------------------------------------------------------------- usuários e auditoria
+const PAPEL_NOME = { master: 'Administrador master', dono: 'Dono', gerente: 'Gerente', vendedor: 'Vendedor' };
+const PAPEL_DESC = {
+  master: 'Tudo, inclusive outros masters',
+  dono: 'Tudo da loja, menos contas master',
+  gerente: 'Pedidos, produtos, notas, categorias e entrega',
+  vendedor: 'Pedidos e consulta de produtos, sem custo',
+};
+async function telaUsuarios() {
+  C().onclick = null;
+  C().innerHTML = '<div class="cab"><h2>Usuários</h2></div><p class="vazio">Carregando…</p>';
+  let lista, log;
+  try { [lista, log] = await Promise.all([api('usuarios'), api('auditoria')]); } catch (e) { return falha(e); }
+  const papeis = Object.keys(PAPEL_NOME).filter((p) => p !== 'master' || pode('usuarios.master'));
+  const optPapel = (sel) => papeis.map((p) => `<option value="${p}" ${p === sel ? 'selected' : ''}>${PAPEL_NOME[p]}</option>`).join('');
+  C().innerHTML = `<div class="cab"><h2>Usuários</h2></div>
+    <div class="secao"><h3>Quem pode fazer o quê</h3>
+      <table class="tab"><tbody>${Object.keys(PAPEL_NOME).map((p) => `<tr><td><strong>${PAPEL_NOME[p]}</strong></td><td>${PAPEL_DESC[p]}</td></tr>`).join('')}</tbody></table></div>
+    <div class="painel"><table class="tab"><thead><tr><th>Nome</th><th class="hm">E-mail</th><th>Papel</th><th class="hm">Último acesso</th><th>Situação</th><th></th></tr></thead><tbody>
+      ${lista.map((x) => {
+        const travado = x.papel === 'master' && !pode('usuarios.master');
+        return `<tr data-uid="${x.id}"><td><strong>${esc(x.nome)}</strong>${x.id === S.eu.id ? ' <span class="mini">(você)</span>' : ''}<div class="mini">${esc(x.email)}</div></td>
+        <td class="hm">${esc(x.email)}</td>
+        <td>${travado ? PAPEL_NOME[x.papel] : `<select data-papel>${optPapel(x.papel)}</select>`}</td>
+        <td class="hm mini">${x.ultimo_acesso ? data(x.ultimo_acesso) : 'nunca'}${x.trocar_senha ? '<div>senha provisória</div>' : ''}</td>
+        <td>${x.ativo ? '<span class="tag entregue">Ativo</span>' : '<span class="tag off">Desativado</span>'}</td>
+        <td style="white-space:nowrap">${travado ? '' : `<button class="lnk" data-salvar-u>Salvar</button><button class="lnk" data-senha-u>Nova senha</button><button class="lnk ${x.ativo ? 'perigo' : ''}" data-ativo-u="${x.ativo ? 0 : 1}">${x.ativo ? 'Desativar' : 'Reativar'}</button>`}</td></tr>`;
+      }).join('')}
+    </tbody></table></div>
+    <form class="secao" id="f-novo-u" style="margin-top:14px"><h3>Novo usuário</h3><div class="form-grid">
+      <div class="campo"><label>Nome</label><input name="nome" required></div>
+      <div class="campo"><label>E-mail</label><input name="email" type="email" required></div>
+      <div class="campo"><label>Papel</label><select name="papel">${optPapel('vendedor')}</select></div>
+      <div class="campo"><label>Senha provisória</label><input name="senha" type="text" minlength="8" required placeholder="ex.: Loja2026abc"></div>
+    </div><p class="mini">A pessoa troca a senha no primeiro acesso. Passe a senha provisória pessoalmente ou por WhatsApp.</p>
+    <button class="btn" style="width:auto">Criar usuário</button></form>
+    <div class="secao"><h3>Registro de ações</h3><p class="mini">As últimas 300 ações: login, preços, pedidos, configurações, usuários e integração.</p>
+      ${log.length ? `<table class="tab"><thead><tr><th>Quando</th><th>Quem</th><th>Ação</th><th>Alvo</th><th class="hm">Detalhe</th></tr></thead><tbody>
+      ${log.map((l) => `<tr><td class="mini">${data(l.criado_em)}</td><td>${esc(l.usuario_nome)}</td><td>${esc(l.acao)}</td><td class="mini">${esc(l.alvo || '')}</td><td class="hm mini" style="max-width:320px;word-break:break-word">${esc((l.detalhe || '').slice(0, 200))}</td></tr>`).join('')}
+      </tbody></table>` : '<p class="mini">Nada registrado ainda.</p>'}</div>`;
+
+  $('#f-novo-u').onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api('usuarios', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) }); toast('Usuário criado'); telaUsuarios(); }
+    catch (er) { falha(er); }
+  };
+  C().onclick = async (e) => {
+    const tr = e.target.closest('tr[data-uid]'); if (!tr) return;
+    const uid = +tr.dataset.uid, d = e.target.dataset;
+    let body = null;
+    if ('salvarU' in d) body = { papel: tr.querySelector('[data-papel]').value };
+    if ('ativoU' in d) {
+      if (d.ativoU === '0' && !confirm('Desativar este usuário? Ele sai do painel na hora.')) return;
+      body = { ativo: d.ativoU === '1' };
+    }
+    if ('senhaU' in d) {
+      const nova = prompt('Nova senha provisória (8+ caracteres, letras e números). A pessoa troca no próximo acesso:');
+      if (!nova) return;
+      body = { senha: nova };
+    }
+    if (!body) return;
+    try { await api(`usuarios/${uid}`, { method: 'PUT', body }); toast('Usuário atualizado'); if (uid === S.eu.id) return iniciar(); telaUsuarios(); }
+    catch (er) { falha(er); }
   };
 }
 

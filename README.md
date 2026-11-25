@@ -21,11 +21,16 @@ catalogo/
 ├── package.json               # scripts: dev, db:local, db:remoto, deploy
 ├── .dev.vars                  # senha do admin para testes locais (não vai pro deploy)
 ├── migrations/
-│   └── 0001_schema.sql        # criação do banco
+│   ├── 0001_schema.sql        # criação do banco
+│   ├── 0002_integracao.sql    # planilha e TagPlus
+│   └── 0003_usuarios.sql      # usuários, auditoria e freio de login
 ├── seed.sql                   # dados de exemplo (opcional)
 ├── src/
 │   ├── worker.js              # API: catálogo, pedidos, painel admin, upload de fotos
-│   └── pix.js                 # gerador do Pix Copia e Cola (BR Code do Banco Central)
+│   ├── pix.js                 # gerador do Pix Copia e Cola (BR Code do Banco Central)
+│   ├── usuarios.js            # papéis, permissões, senhas e auditoria
+│   ├── importar.js            # importação da planilha
+│   └── tagplus/               # cliente da API, sincronização e mapeamento de campos
 └── public/                    # arquivos servidos ao navegador
     ├── index.html             # vitrine
     ├── app.js                 # vitrine: busca, categorias, produto, carrinho, envio
@@ -88,7 +93,9 @@ O DDL completo está em `migrations/0001_schema.sql`.
 | `GET /api/produtos` | produtos ativos com fotos, variações e especificações |
 | `POST /api/pedidos` | cria o pedido e devolve `codigo`, `mensagem`, `whatsapp_url` e `pix` |
 | `GET /img/:chave` | fotos do R2 |
-| `POST /api/admin/login` | `{senha}` → token válido por 12 h |
+| `POST /api/admin/login` | `{email, senha}` → token válido por 12 h |
+| `GET /api/admin/eu`, `POST /api/admin/minha-senha` | usuário logado e permissões; troca da própria senha |
+| `GET/POST/PUT /api/admin/usuarios[/id]`, `GET /api/admin/auditoria` | gestão de usuários e registro de ações |
 | `GET/POST/PUT/DELETE /api/admin/produtos[/id]` | cadastro de produtos (fotos, variações e especificações em uma chamada) |
 | `POST /api/admin/upload` | envio de foto (campo `arquivo`, até 5 MB; o painel reduz para 1600 px antes) |
 | `GET/PUT /api/admin/config` | dados da loja e do Pix |
@@ -125,6 +132,25 @@ Migrações futuras: `npm run db:remoto`.
 ### Fotos: KV ou R2
 O projeto usa o KV porque ele é gratuito e não pede cartão. O plano grátis tem 1 GB e mil gravações por dia, o que basta para um catálogo. Se você ativar o R2 no painel, troque o bloco `[[kv_namespaces]]` pelo `[[r2_buckets]]` comentado no `wrangler.toml`. O código aceita os dois.
 
+## Usuários e permissões
+
+Cada pessoa entra no painel com o próprio e-mail e senha. As senhas são guardadas com PBKDF2-SHA256.
+
+| Papel | O que pode |
+|---|---|
+| Administrador master | Tudo, inclusive criar, alterar e desativar outros masters |
+| Dono | Tudo da loja (Loja & Pix, Integração, Usuários), menos contas master |
+| Gerente | Pedidos, notas, produtos (com custo), importação, categorias e entrega |
+| Vendedor | Pedidos (ver e mudar status) e consulta de produtos, sem custo |
+
+- **Primeiro acesso:** entre em `/admin` com o e-mail em branco e a senha mestra (`ADMIN_PASSWORD`). O painel pede para criar o Administrador master. A partir daí a senha mestra deixa de funcionar.
+- Usuário novo recebe uma senha provisória e é obrigado a trocá-la no primeiro acesso.
+- Desativar o usuário, mudar o papel dele ou redefinir a senha derruba as sessões abertas na hora.
+- O sistema não deixa ficar sem nenhum Administrador master ativo.
+- 5 senhas erradas no mesmo e-mail bloqueiam esse e-mail por 15 minutos. O bloqueio por IP só acontece com 30 erros, para não travar a loja inteira num Wi-Fi compartilhado.
+- O registro de ações (aba Usuários) guarda login, mudanças de preço e estoque, status de pedido, configurações, usuários e integração.
+- **Se perder o acesso de todos os masters:** desative-os direto no D1 (`UPDATE usuarios SET ativo = 0 WHERE papel = 'master'`). A senha mestra volta a funcionar para criar um novo master.
+
 ## Importar produtos por planilha
 
 1. Baixe o modelo no painel (Produtos → Baixar modelo) ou em `/modelo-importacao-catalogo.xlsx`.
@@ -158,4 +184,3 @@ O usuário do TagPlus que autoriza o app precisa da permissão "Modificar o Valo
 ## Próximos passos possíveis
 
 - Cupom de desconto e frete grátis na primeira compra.
-- Vários usuários no painel, com permissões.

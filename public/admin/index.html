@@ -12,7 +12,9 @@
   <section id="tela-login" class="login" hidden>
     <form id="form-login" class="cx">
       <h1>Painel da loja</h1>
+      <div class="campo"><label for="email">E-mail</label><input id="email" type="email" autocomplete="username" placeholder="voce@loja.com.br"></div>
       <div class="campo"><label for="senha">Senha</label><input id="senha" type="password" autocomplete="current-password" required></div>
+      <p class="mini" style="margin:0">Primeiro acesso? Deixe o e-mail em branco e use a senha mestra para criar o Administrador master.</p>
       <p class="erro-msg" id="erro-login" hidden></p>
       <button class="btn">Entrar</button>
     </form>
@@ -28,8 +30,9 @@
         <button data-aba="regioes">Entrega</button>
         <button data-aba="loja">Loja &amp; Pix</button>
         <button data-aba="integracao">Integração</button>
+        <button data-aba="usuarios">Usuários</button>
       </nav>
-      <div class="adm-acoes"><a href="/" target="_blank">Ver catálogo ↗</a><button id="sair">Sair</button></div>
+      <div class="adm-acoes"><a href="/" target="_blank">Ver catálogo ↗</a><span class="mini" id="eu-nome"></span><button id="minha-senha">Minha senha</button><button id="sair">Sair</button></div>
     </header>
     <main class="wrap adm" id="conteudo"></main>
   </div>
