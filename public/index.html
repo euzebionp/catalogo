@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Catálogo</title>
+  <meta name="description" content="Monte seu pedido e envie pelo WhatsApp.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="avisos" id="avisos"></div>
+
+  <header class="topo">
+    <div class="wrap topo-in">
+      <a class="marca" href="/" id="marca"></a>
+      <form class="busca" id="busca" role="search">
+        <input id="q" type="search" placeholder="O que você procura?" aria-label="Buscar produtos" autocomplete="off">
+        <button aria-label="Buscar"><svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M10 2a8 8 0 0 1 6.3 12.9l5.4 5.4-1.4 1.4-5.4-5.4A8 8 0 1 1 10 2zm0 2a6 6 0 1 0 0 12 6 6 0 0 0 0-12z"/></svg></button>
+      </form>
+      <div class="acoes">
+        <a id="lnk-insta" class="ic" target="_blank" rel="noopener" aria-label="Instagram" hidden>
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1-5 5H7a5 5 0 0 1-5-5V7a5 5 0 0 1 5-5zm0 2a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3V7a3 3 0 0 0-3-3H7zm5 3.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9zm0 2a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM17.5 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>
+        </a>
+        <a id="lnk-wpp" class="ic wpp" target="_blank" rel="noopener" aria-label="WhatsApp">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2zm0 2a8 8 0 1 1-4.2 14.8l-.3-.2-3 .8.8-2.9-.2-.3A8 8 0 0 1 12 4zm-3.2 4c-.2 0-.5 0-.7.3-.3.3-1 1-1 2.4s1 2.8 1.2 3c.1.2 2 3.1 4.9 4.3 2.4 1 2.9.8 3.4.7.5 0 1.7-.7 1.9-1.4.2-.7.2-1.3.2-1.4l-.5-.3-1.7-.8c-.2-.1-.4-.1-.6.1l-.8 1c-.1.2-.3.2-.5.1-.3-.1-1.1-.4-2-1.3-.8-.7-1.3-1.5-1.4-1.8-.2-.2 0-.4.1-.5l.4-.5.3-.4v-.4l-.8-1.9c-.2-.5-.4-.4-.5-.4h-.5z"/></svg>
+        </a>
+        <button class="btn-carrinho" id="abrir-carrinho" aria-label="Abrir carrinho">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M7 18a2 2 0 1 1 0 4 2 2 0 0 1 0-4zm10 0a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM1 2h3.3l.9 2H21a1 1 0 0 1 .9 1.4l-3.6 7a2 2 0 0 1-1.8 1.1H8.1l-1.1 2H19v2H7a2 2 0 0 1-1.8-3l1.4-2.5L3 4H1V2z"/></svg>
+          <span class="rot">Carrinho</span>
+          <span class="badge" id="badge" hidden>0</span>
+        </button>
+      </div>
+    </div>
+    <nav class="cats wrap" id="cats" aria-label="Categorias"></nav>
+  </header>
+
+  <main class="wrap">
+    <div class="barra">
+      <h1 id="titulo-lista">Todos os produtos</h1>
+      <select id="ordem" aria-label="Ordenar">
+        <option value="">Destaques</option>
+        <option value="menor">Menor preço</option>
+        <option value="maior">Maior preço</option>
+        <option value="az">Nome A–Z</option>
+      </select>
+    </div>
+    <div class="grade" id="grade"><p class="vazio">Carregando produtos…</p></div>
+  </main>
+
+  <footer class="rodape"><div class="wrap" id="rodape"></div></footer>
+
+  <!-- Produto -->
+  <dialog class="modal" id="modal-produto"></dialog>
+
+  <!-- Carrinho -->
+  <div class="veu" id="veu" hidden></div>
+  <aside class="gaveta" id="gaveta" aria-label="Carrinho" aria-hidden="true">
+    <div class="gaveta-topo">
+      <h2>Seu pedido</h2>
+      <button class="fechar" id="fechar-carrinho" aria-label="Fechar">×</button>
+    </div>
+    <div class="gaveta-corpo" id="gaveta-corpo"></div>
+    <div class="gaveta-pe" id="gaveta-pe"></div>
+  </aside>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/vendor/qrcode.js" defer></script>
+  <script src="/app.js" defer></script>
+</body>
+</html>

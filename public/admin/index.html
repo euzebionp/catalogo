@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Painel da loja</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body>
+  <section id="tela-login" class="login" hidden>
+    <form id="form-login" class="cx">
+      <h1>Painel da loja</h1>
+      <div class="campo"><label for="senha">Senha</label><input id="senha" type="password" autocomplete="current-password" required></div>
+      <p class="erro-msg" id="erro-login" hidden></p>
+      <button class="btn">Entrar</button>
+    </form>
+  </section>
+
+  <div id="app" hidden>
+    <header class="adm-topo">
+      <strong id="adm-nome">Painel</strong>
+      <nav id="abas">
+        <button data-aba="pedidos" class="on">Pedidos</button>
+        <button data-aba="produtos">Produtos</button>
+        <button data-aba="categorias">Categorias</button>
+        <button data-aba="regioes">Entrega</button>
+        <button data-aba="loja">Loja &amp; Pix</button>
+      </nav>
+      <div class="adm-acoes"><a href="/" target="_blank">Ver catálogo ↗</a><button id="sair">Sair</button></div>
+    </header>
+    <main class="wrap adm" id="conteudo"></main>
+  </div>
+
+  <dialog class="modal" id="dlg"></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/admin/admin.js" defer></script>
+</body>
+</html>

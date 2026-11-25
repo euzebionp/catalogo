@@ -1,0 +1,14 @@
+{
+  "name": "catalogo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "db:local": "wrangler d1 migrations apply catalogo-db --local && wrangler d1 execute catalogo-db --local --file=seed.sql",
+    "db:remoto": "wrangler d1 migrations apply catalogo-db --remote",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.40.0"
+  }
+}
