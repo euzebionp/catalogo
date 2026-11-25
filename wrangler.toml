@@ -7,8 +7,9 @@
 name = "catalogo"
 main = "src/worker.js"
 compatibility_date = "2025-09-01"
-# domínio da Joice Rosa (instalação padrão)
+# domínio da Joice Rosa (instalação padrão). O endereço .workers.dev continua ligado como reserva.
 routes = [{ pattern = "joicerosa.infoservicos.com.br", custom_domain = true }]
+workers_dev = true
 
 [assets]
 directory = "./public"
@@ -45,6 +46,7 @@ id = "635962451a234bd3b09abab68b2b338b"
 [env.demo]
 name = "catalogo-demo"
 routes = [{ pattern = "demo.infoservicos.com.br", custom_domain = true }]
+workers_dev = true
 vars = { DEMO = "1" }
 
 [env.demo.assets]
