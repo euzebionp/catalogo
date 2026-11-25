@@ -319,12 +319,12 @@ async function telaLoja() {
       ${c.logo_key ? `<div class="campo c4"><img src="${/^https?:/.test(c.logo_key) ? esc(c.logo_key) : '/img/' + esc(c.logo_key)}" alt="Logo" style="height:56px;width:auto"></div>` : ''}
     </div></div>
     <div class="secao"><h3>Contato e atendimento</h3><div class="form-grid">
-      ${inp('whatsapp', 'WhatsApp que recebe os pedidos', 'placeholder="5534999999999" required inputmode="tel"', 'c2')}
+      ${inp('whatsapp', 'WhatsApp que recebe os pedidos', 'placeholder="(34) 99999-9999" required inputmode="tel"', 'c2')}
       ${inp('instagram', 'Instagram (sem @)', '', 'c2')}
       ${inp('endereco_loja', 'Endereço da loja (retirada)', '', 'c4')}
       ${inp('horario', 'Horário de atendimento', 'placeholder="Seg a Sex 08:00–18:00"', 'c4')}
       ${inp('aviso_topo', 'Avisos da faixa do topo (separe com |)', 'placeholder="Frete grátis acima de R$ 150|Entrega no mesmo dia"', 'c4')}
-    </div><p class="mini">WhatsApp: só números, com 55 + DDD. Ex.: 5534991713979.</p></div>
+    </div><p class="mini">WhatsApp: DDD + número, ex.: (34) 99769-3393. O 55 do Brasil é acrescentado automaticamente.</p></div>
     <div class="secao"><h3>Entrega e retirada</h3><div class="form-grid">
       <div class="campo"><label>Pedido mínimo p/ entrega (R$)</label><input name="pedido_minimo" value="${reais(c.pedido_minimo)}" inputmode="decimal"></div></div>
       ${chk('permite_entrega', 'Fazemos entrega')}${chk('permite_retirada', 'Cliente pode retirar na loja')}</div>

@@ -10,7 +10,7 @@ Inspirado no fluxo de papelarianovaponte.com.br, que usa vitrine, carrinho em ga
 |---|---|---|
 | Servidor/API | Cloudflare Workers | gratuito até 100 mil acessos/dia, sem servidor para manter |
 | Banco de dados | Cloudflare D1 (SQLite) | gratuito até 5 GB |
-| Fotos | Cloudflare R2 | gratuito até 10 GB, sem custo de saída |
+| Fotos | Cloudflare KV (ou R2) | gratuito, sem cartão |
 | Telas | HTML + CSS + JavaScript puro | sem build, carrega rápido no celular |
 
 ## Estrutura do projeto
@@ -106,16 +106,24 @@ A senha local do painel está em `.dev.vars` (`troque-esta-senha`).
 
 ## Publicar (Cloudflare)
 
-```bash
-npx wrangler login
-npx wrangler d1 create catalogo-db          # copie o database_id para o wrangler.toml
-npx wrangler r2 bucket create catalogo-imagens
-npm run db:remoto                            # cria as tabelas (sem dados de exemplo)
-npx wrangler secret put ADMIN_PASSWORD       # senha do painel
-npx wrangler secret put SESSION_SECRET       # texto aleatório longo
-npm run deploy
-```
-Depois do deploy, acesse `/admin`. Em **Loja & Pix**, preencha o WhatsApp (55 + DDD + número), a chave Pix, o favorecido e a cidade. Cadastre as regiões de entrega em **Entrega** e depois os produtos. Para usar um domínio próprio, adicione-o ao Worker no painel da Cloudflare.
+Já estão criados na conta Cloudflare:
+- banco D1 `catalogo-db` (`d86d0a84-5548-468f-a2ee-0d3858c076f6`), com as tabelas já aplicadas;
+- KV `catalogo-imagens` (`635962451a234bd3b09abab68b2b338b`), que guarda as fotos.
+
+O deploy é feito pela integração com o GitHub. Cada `git push` na branch `main` publica de novo.
+
+1. No painel da Cloudflare, abra **Workers & Pages → Create → Import a repository** e escolha `euzebionp/catalogo`.
+2. Deixe o nome do projeto como `catalogo`, o comando de build vazio e o comando de deploy como `npx wrangler deploy`.
+3. Depois do primeiro deploy, abra **Settings → Variables and Secrets** e adicione dois **Secrets**:
+   - `ADMIN_PASSWORD`, com a senha do painel;
+   - `SESSION_SECRET`, com um texto aleatório longo.
+4. Acesse `https://catalogo.<sua-conta>.workers.dev/admin`. Em **Loja & Pix**, preencha o WhatsApp, a chave Pix, o favorecido e a cidade. Depois cadastre as regiões de entrega e os produtos.
+
+Se preferir usar o terminal: `npx wrangler login`, depois `npx wrangler secret put ADMIN_PASSWORD` e `npm run deploy`.
+Migrações futuras: `npm run db:remoto`.
+
+### Fotos: KV ou R2
+O projeto usa o KV porque ele é gratuito e não pede cartão. O plano grátis tem 1 GB e mil gravações por dia, o que basta para um catálogo. Se você ativar o R2 no painel, troque o bloco `[[kv_namespaces]]` pelo `[[r2_buckets]]` comentado no `wrangler.toml`. O código aceita os dois.
 
 ## Próximos passos possíveis
 

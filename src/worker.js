@@ -15,6 +15,13 @@ class HttpError extends Error {
 
 const brl = (c) => 'R$ ' + (c / 100).toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 const digitos = (s) => String(s || '').replace(/\D/g, '');
+// Número para o link do WhatsApp: precisa do código do país (55).
+// Aceita "(34) 99769-3393", "034997693393", "+55 34 99769-3393"...
+const numeroWhats = (s) => {
+  let d = digitos(s).replace(/^0+/, '');
+  if (d.length === 10 || d.length === 11) d = '55' + d;
+  return d;
+};
 const texto = (s, max = 500) => String(s ?? '').trim().slice(0, max);
 const inteiro = (v, def = null) => (v === '' || v === null || v === undefined || isNaN(+v) ? def : Math.round(+v));
 const slugify = (s) =>
@@ -29,6 +36,31 @@ function fone(t) {
   if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
   return t;
 }
+
+
+// ---------------------------------------------------------------- fotos: R2 (IMAGENS) ou KV (IMAGENS_KV)
+const fotos = {
+  ativo: (env) => !!(env.IMAGENS || env.IMAGENS_KV),
+  async put(env, key, file) {
+    if (env.IMAGENS) return env.IMAGENS.put(key, file.stream(), { httpMetadata: { contentType: file.type } });
+    return env.IMAGENS_KV.put(key, await file.arrayBuffer(), { metadata: { contentType: file.type } });
+  },
+  async get(env, key) {
+    if (env.IMAGENS) {
+      const obj = await env.IMAGENS.get(key);
+      if (!obj) return null;
+      return { body: obj.body, type: obj.httpMetadata?.contentType || 'application/octet-stream' };
+    }
+    if (!env.IMAGENS_KV) return null;
+    const r = await env.IMAGENS_KV.getWithMetadata(key, { type: 'stream', cacheTtl: 86400 });
+    return r.value ? { body: r.value, type: r.metadata?.contentType || 'application/octet-stream' } : null;
+  },
+  async del(env, keys) {
+    if (!keys.length) return;
+    if (env.IMAGENS) return env.IMAGENS.delete(keys);
+    if (env.IMAGENS_KV) await Promise.all(keys.map((k) => env.IMAGENS_KV.delete(k)));
+  },
+};
 
 // ---------------------------------------------------------------- autenticação admin
 // Senha em segredo do Worker (ADMIN_PASSWORD). Token = expiração.assinaturaHMAC
@@ -66,7 +98,7 @@ function configPublica(c) {
   return {
     nome: c.nome, slogan: c.slogan, segmento: c.segmento, logo: imgUrl(c.logo_key),
     cor_primaria: c.cor_primaria, cor_destaque: c.cor_destaque,
-    whatsapp: c.whatsapp, instagram: c.instagram, endereco_loja: c.endereco_loja,
+    whatsapp: numeroWhats(c.whatsapp), instagram: c.instagram, endereco_loja: c.endereco_loja,
     horario: c.horario, avisos: (c.aviso_topo || '').split('|').map((s) => s.trim()).filter(Boolean),
     pedido_minimo: c.pedido_minimo,
     permite_retirada: !!c.permite_retirada, permite_entrega: !!c.permite_entrega,
@@ -253,7 +285,7 @@ async function criarPedido(req, env) {
   const mensagem = L.join('\n');
   return json({
     codigo, subtotal, taxa_entrega: taxa, total, mensagem, pix,
-    whatsapp_url: `https://wa.me/${digitos(cfg.whatsapp)}?text=${encodeURIComponent(mensagem)}`,
+    whatsapp_url: `https://wa.me/${numeroWhats(cfg.whatsapp)}?text=${encodeURIComponent(mensagem)}`,
   }, 201);
 }
 
@@ -310,12 +342,12 @@ async function salvarProduto(env, id, b) {
     else st.push(env.DB.prepare('INSERT INTO produto_variacoes (nome, sku, preco, estoque, ordem, ativo, produto_id) VALUES (?,?,?,?,?,?,?)').bind(...vals, id));
   });
   await env.DB.batch(st);
-  if (removidas.length && env.IMAGENS) await env.IMAGENS.delete(removidas);
+  await fotos.del(env, removidas);
   return (await carregarProdutos(env, { somenteAtivos: false, id }))[0];
 }
 
 async function upload(req, env) {
-  if (!env.IMAGENS) throw new HttpError('Armazenamento de imagens (R2) não configurado.', 500);
+  if (!fotos.ativo(env)) throw new HttpError('Armazenamento de imagens não configurado.', 500);
   const form = await req.formData();
   const f = form.get('arquivo');
   if (!f || typeof f === 'string') throw new HttpError('Envie um arquivo.');
@@ -323,7 +355,7 @@ async function upload(req, env) {
   if (!tipos[f.type]) throw new HttpError('Formato não suportado (use JPG, PNG ou WEBP).');
   if (f.size > 5 * 1024 * 1024) throw new HttpError('Imagem acima de 5 MB.');
   const key = `p/${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}.${tipos[f.type]}`;
-  await env.IMAGENS.put(key, f.stream(), { httpMetadata: { contentType: f.type, cacheControl: 'public, max-age=31536000, immutable' } });
+  await fotos.put(env, key, f);
   return json({ key, url: imgUrl(key) }, 201);
 }
 
@@ -367,7 +399,7 @@ async function crud(req, env, nome, id) {
 const CONFIG_CAMPOS = {
   nome: (v) => texto(v, 80) || 'Minha Loja', slogan: (v) => texto(v, 150) || null, segmento: (v) => texto(v, 20) || 'misto',
   logo_key: (v) => texto(v, 300) || null, cor_primaria: (v) => (/^#[0-9a-f]{6}$/i.test(v) ? v : '#3b3fb6'),
-  cor_destaque: (v) => (/^#[0-9a-f]{6}$/i.test(v) ? v : '#f39c12'), whatsapp: (v) => digitos(v),
+  cor_destaque: (v) => (/^#[0-9a-f]{6}$/i.test(v) ? v : '#f39c12'), whatsapp: (v) => numeroWhats(v),
   instagram: (v) => texto(v, 60).replace(/^@/, '') || null, endereco_loja: (v) => texto(v, 200) || null,
   horario: (v) => texto(v, 200) || null, aviso_topo: (v) => texto(v, 400) || null,
   pedido_minimo: (v) => Math.max(0, inteiro(v, 0)), permite_retirada: (v) => (v ? 1 : 0), permite_entrega: (v) => (v ? 1 : 0),
@@ -386,13 +418,11 @@ async function rotear(req, env) {
 
   // imagens do R2
   if (path.startsWith('/img/') && m === 'GET') {
-    const obj = env.IMAGENS && (await env.IMAGENS.get(decodeURIComponent(path.slice(5))));
+    const obj = await fotos.get(env, decodeURIComponent(path.slice(5)));
     if (!obj) return new Response('Não encontrada', { status: 404 });
-    const h = new Headers();
-    obj.writeHttpMetadata(h);
-    h.set('etag', obj.httpEtag);
-    h.set('cache-control', 'public, max-age=31536000, immutable');
-    return new Response(obj.body, { headers: h });
+    return new Response(obj.body, {
+      headers: { 'content-type': obj.type, 'cache-control': 'public, max-age=31536000, immutable' },
+    });
   }
 
   // ---- público
@@ -452,7 +482,7 @@ async function rotear(req, env) {
       const keys = (await env.DB.prepare('SELECT r2_key FROM produto_imagens WHERE produto_id = ?').bind(id).all())
         .results.map((r) => r.r2_key).filter((k) => !/^https?:/.test(k));
       await env.DB.prepare('DELETE FROM produtos WHERE id = ?').bind(id).run();
-      if (keys.length && env.IMAGENS) await env.IMAGENS.delete(keys);
+      await fotos.del(env, keys);
       return json({ ok: true });
     }
   }
