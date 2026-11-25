@@ -1,5 +1,8 @@
 // Catálogo eletrônico — API (Cloudflare Worker + D1 + R2)
 import { brCode } from './pix.js';
+import { importarLinhas } from './importar.js';
+import { configurado as tagplusConfigurado, urlAutorizacao, trocarCodigo, lerChave, gravarChave, registrar, api as tagplusApi, renovarToken } from './tagplus/cliente.js';
+import { enfileirar, processarFila, sincronizarProdutos, receberWebhook } from './tagplus/sync.js';
 
 // ---------------------------------------------------------------- utilidades
 const json = (data, status = 200) =>
@@ -139,6 +142,7 @@ async function carregarProdutos(env, { somenteAtivos = true, id = null } = {}) {
     preco: p.preco, preco_antigo: p.preco_antigo, unidade: p.unidade,
     qtd_minima: p.qtd_minima, multiplo: p.multiplo, estoque: p.estoque,
     destaque: !!p.destaque, ativo: !!p.ativo,
+    ...(somenteAtivos ? {} : { codigo: p.codigo, ncm: p.ncm, cest: p.cest, custo: p.custo, tagplus_id: p.tagplus_id, sincronizado_em: p.sincronizado_em }),
     imagens: (gI[p.id] || []).map((i) => ({ key: i.r2_key, url: imgUrl(i.r2_key) })),
     variacoes: (gV[p.id] || []).map((v) => ({
       id: v.id, nome: v.nome, sku: v.sku, preco: v.preco, estoque: v.estoque, ativo: !!v.ativo,
@@ -160,6 +164,8 @@ async function criarPedido(req, env) {
   const telefone = digitos(b.telefone);
   if (nome.length < 2) throw new HttpError('Informe seu nome.');
   if (telefone.length < 10) throw new HttpError('Informe um telefone com DDD.');
+  const cpfCnpj = digitos(b.cpf_cnpj);
+  if (cpfCnpj && cpfCnpj.length !== 11 && cpfCnpj.length !== 14) throw new HttpError('CPF ou CNPJ inválido.');
 
   const recebimento = b.recebimento === 'retirada' ? 'retirada' : 'entrega';
   if (recebimento === 'entrega' && !pub.permite_entrega) throw new HttpError('A loja não está fazendo entregas.');
@@ -216,11 +222,12 @@ async function criarPedido(req, env) {
 
   // cliente (upsert pelo telefone)
   const cli = await env.DB.prepare(
-    `INSERT INTO clientes (nome, telefone, endereco, referencia) VALUES (?,?,?,?)
+    `INSERT INTO clientes (nome, telefone, endereco, referencia, cpf_cnpj) VALUES (?,?,?,?,?)
      ON CONFLICT(telefone) DO UPDATE SET nome = excluded.nome,
+       cpf_cnpj = COALESCE(excluded.cpf_cnpj, clientes.cpf_cnpj),
        endereco = COALESCE(excluded.endereco, clientes.endereco),
        referencia = COALESCE(excluded.referencia, clientes.referencia)
-     RETURNING id`).bind(nome, telefone, endereco || null, referencia || null).first();
+     RETURNING id`).bind(nome, telefone, endereco || null, referencia || null, cpfCnpj || null).first();
 
   const agora = new Date(Date.now() - 3 * 3600e3); // horário de Brasília
   const codigo = 'P' + agora.toISOString().slice(2, 10).replace(/-/g, '') + '-' +
@@ -228,11 +235,11 @@ async function criarPedido(req, env) {
 
   const ped = await env.DB.prepare(
     `INSERT INTO pedidos (codigo, cliente_id, cliente_nome, cliente_telefone, recebimento, regiao_id, regiao_nome,
-       endereco, referencia, pagamento, troco_para, observacoes, subtotal, taxa_entrega, total)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`).bind(
+       endereco, referencia, pagamento, troco_para, observacoes, subtotal, taxa_entrega, total, cliente_cpf_cnpj)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`).bind(
     codigo, cli.id, nome, telefone, recebimento, regiao?.id ?? null, regiao?.nome ?? null,
     recebimento === 'entrega' ? endereco : null, recebimento === 'entrega' ? referencia : null,
-    pagamento, troco, obs || null, subtotal, taxa, total).first();
+    pagamento, troco, obs || null, subtotal, taxa, total, cpfCnpj || null).first();
 
   const stmts = itens.map((i) => env.DB.prepare(
     `INSERT INTO pedido_itens (pedido_id, produto_id, variacao_id, nome, variacao, unidade, preco_unit, quantidade, total)
@@ -258,6 +265,7 @@ async function criarPedido(req, env) {
   L.push('');
   L.push(`*Cliente:* ${nome}`);
   L.push(`*Telefone:* ${fone(telefone)}`);
+  if (cpfCnpj) L.push(`*CPF/CNPJ na nota:* ${cpfCnpj}`);
   L.push('');
   L.push('*Itens*');
   for (const i of itens)
@@ -303,16 +311,23 @@ async function salvarProduto(env, id, b) {
   const campos = [inteiro(b.categoria_id), nome, slug, texto(b.descricao, 4000) || null, texto(b.marca, 80) || null,
     texto(b.sku, 60) || null, preco, inteiro(b.preco_antigo), texto(b.unidade, 10) || 'un',
     Math.max(1, inteiro(b.qtd_minima, 1)), Math.max(1, inteiro(b.multiplo, 1)), inteiro(b.estoque),
-    b.destaque ? 1 : 0, b.ativo === false ? 0 : 1];
+    b.destaque ? 1 : 0, b.ativo === false ? 0 : 1,
+    texto(b.codigo, 60) || null, digitos(b.ncm).slice(0, 8) || null, digitos(b.cest).slice(0, 7) || null, inteiro(b.custo), inteiro(b.tagplus_id)];
+  if (campos[14]) {
+    const dup = await env.DB.prepare('SELECT id FROM produtos WHERE codigo = ? AND id IS NOT ?').bind(campos[14], id).first('id');
+    if (dup) throw new HttpError('Já existe outro produto com esse código.');
+  }
 
   if (id) {
     const r = await env.DB.prepare(`UPDATE produtos SET categoria_id=?, nome=?, slug=?, descricao=?, marca=?, sku=?, preco=?,
-      preco_antigo=?, unidade=?, qtd_minima=?, multiplo=?, estoque=?, destaque=?, ativo=?, atualizado_em=datetime('now')
+      preco_antigo=?, unidade=?, qtd_minima=?, multiplo=?, estoque=?, destaque=?, ativo=?, codigo=?, ncm=?, cest=?, custo=?,
+      tagplus_id=?, atualizado_em=datetime('now')
       WHERE id = ?`).bind(...campos, id).run();
     if (!r.meta.changes) throw new HttpError('Produto não encontrado.', 404);
   } else {
     id = (await env.DB.prepare(`INSERT INTO produtos (categoria_id, nome, slug, descricao, marca, sku, preco, preco_antigo,
-      unidade, qtd_minima, multiplo, estoque, destaque, ativo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`)
+      unidade, qtd_minima, multiplo, estoque, destaque, ativo, codigo, ncm, cest, custo, tagplus_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`)
       .bind(...campos).first('id'));
   }
 
@@ -441,6 +456,17 @@ async function rotear(req, env) {
   }
   if (path === '/api/pedidos' && m === 'POST') return criarPedido(req, env);
 
+  // ---- TagPlus: retorno do OAuth e webhook (chamados pelo TagPlus, sem login do painel)
+  if (path === '/api/tagplus/callback' && m === 'GET') return tagplusCallback(url, env);
+  if (path === '/api/tagplus/webhook' && m === 'POST') {
+    const segredoWebhook = env.TAGPLUS_WEBHOOK_SECRET;
+    const recebido = req.headers.get('x-hub-secret') || '';
+    if (!segredoWebhook || !iguais(await hmac('cmp', recebido), await hmac('cmp', segredoWebhook))) return erro('Não autorizado', 401);
+    const corpo = await req.json().catch(() => null);
+    if (!corpo) return erro('JSON inválido');
+    return json(await receberWebhook(env, corpo));
+  }
+
   // ---- admin
   if (path === '/api/admin/login' && m === 'POST') {
     if (!env.ADMIN_PASSWORD) return erro('Defina o segredo ADMIN_PASSWORD no Worker.', 500);
@@ -458,6 +484,14 @@ async function rotear(req, env) {
   const id = inteiro(idStr);
 
   if (rec === 'upload' && m === 'POST') return upload(req, env);
+
+  if (rec === 'importar' && m === 'POST') {
+    const b = await req.json().catch(() => ({}));
+    try { return json(await importarLinhas(env, b.linhas, { atualizarFotos: b.atualizar_fotos !== false })); }
+    catch (e) { throw new HttpError(e.message); }
+  }
+
+  if (rec === 'tagplus') return rotasTagplus(req, env, url, seg.slice(1));
 
   if (rec === 'config') {
     if (m === 'GET') return json(await getConfig(env));
@@ -503,6 +537,19 @@ async function rotear(req, env) {
       ]);
       return p.results[0] ? json({ ...p.results[0], itens: itens.results }) : erro('Pedido não encontrado.', 404);
     }
+    if (m === 'POST' && seg[2] === 'enviar-erp') {
+      exigirTagplus(env);
+      await env.DB.prepare(`UPDATE pedidos SET erp_status = 'pendente' WHERE id = ?`).bind(id).run();
+      await enfileirar(env, 'enviar_pedido', id);
+      return json({ ok: true, fila: await processarFila(env, 5) });
+    }
+    if (m === 'POST' && seg[2] === 'emitir-nota') {
+      exigirTagplus(env);
+      const { tipo } = await req.json().catch(() => ({}));
+      await env.DB.prepare(`UPDATE pedidos SET nf_status = 'solicitada', nf_erro = NULL WHERE id = ?`).bind(id).run();
+      await enfileirar(env, 'emitir_nota', id, { tipo: tipo === 'nfe' ? 'nfe' : 'nfce' });
+      return json({ ok: true, fila: await processarFila(env, 5) });
+    }
     if (m === 'PUT') {
       const { status } = await req.json();
       const atual = await env.DB.prepare('SELECT status FROM pedidos WHERE id = ?').bind(id).first('status');
@@ -519,13 +566,135 @@ async function rotear(req, env) {
           (SELECT produto_id FROM pedido_itens WHERE pedido_id = ? AND variacao_id IS NULL)`).bind(id, id));
       }
       await env.DB.batch(st).catch(() => { throw new HttpError('Status inválido.'); });
+      if (status === 'confirmado' && atual !== 'confirmado' && tagplusConfigurado(env)) {
+        const opc = { ...OPCOES_PADRAO, ...((await lerChave(env, 'tagplus_opcoes')) || {}) };
+        if (opc.enviar_ao_confirmar && (await lerChave(env, 'tagplus_token'))) {
+          await env.DB.prepare(`UPDATE pedidos SET erp_status = 'pendente' WHERE id = ? AND tagplus_pedido_id IS NULL`).bind(id).run();
+          await enfileirar(env, 'enviar_pedido', id);
+          if (opc.emitir_nota_ao_confirmar) await enfileirar(env, 'emitir_nota', id, { tipo: opc.tipo_nota || 'nfce' });
+        }
+      }
       return json({ ok: true });
     }
   }
   return erro('Rota não encontrada.', 404);
 }
 
+// ---------------------------------------------------------------- TagPlus: conexão, opções, diagnóstico
+function exigirTagplus(env) {
+  if (!tagplusConfigurado(env)) throw new HttpError('Cadastre TAGPLUS_CLIENT_ID e TAGPLUS_CLIENT_SECRET nos segredos do Worker.', 400);
+}
+
+async function tagplusCallback(url, env) {
+  const volta = (msg) => Response.redirect(new URL('/admin/#integracao=' + encodeURIComponent(msg), url).toString(), 302);
+  const [exp, sig] = (url.searchParams.get('state') || '').split('.');
+  if (!exp || +exp < Date.now() || !iguais(sig || '', await hmac(segredo(env), 'tagplus' + exp))) return volta('Link de autorização expirado. Tente conectar de novo.');
+  const code = url.searchParams.get('code');
+  if (!code) return volta('O TagPlus não autorizou a conexão.');
+  try {
+    await trocarCodigo(env, code);
+    const eu = await tagplusApi(env, 'GET', '/me').catch(() => null);
+    await gravarChave(env, 'tagplus_conta', { usuario: eu?.nome || eu?.login || null, sistema: eu?.sistema || null, conectado_em: new Date().toISOString() });
+    await registrar(env, 'tagplus', 'conectado', { detalhe: { usuario: eu?.nome } });
+    return volta('ok');
+  } catch (e) {
+    await registrar(env, 'tagplus', 'conexao_falhou', { ok: false, detalhe: e.message });
+    return volta('Falha ao conectar: ' + e.message);
+  }
+}
+
+const OPCOES_PADRAO = {
+  enviar_ao_confirmar: true,        // status "confirmado" no painel envia o pedido ao TagPlus
+  emitir_nota_ao_confirmar: false,  // e já pede a nota
+  tipo_nota: 'nfce',
+  sincronizar_automatico: true,     // a cada 10 min busca produtos alterados
+  manter_preco_catalogo: false,     // true = preço do catálogo não é sobrescrito pelo ERP
+  manter_nome_catalogo: false,
+  novos_ocultos: true,              // produto novo do ERP sem foto entra oculto
+  formas_pagamento: {},             // { pix_chave: <id TagPlus>, cartao: <id>, ... }
+};
+
+async function rotasTagplus(req, env, url, [acao]) {
+  const m = req.method;
+  if (acao === 'status' && m === 'GET') {
+    const [token, conta, opcoes, desde, fila, log] = await Promise.all([
+      lerChave(env, 'tagplus_token'), lerChave(env, 'tagplus_conta'), lerChave(env, 'tagplus_opcoes'), lerChave(env, 'tagplus_produtos_desde'),
+      env.DB.prepare(`SELECT status, COUNT(*) n FROM integracao_fila GROUP BY status`).all(),
+      env.DB.prepare(`SELECT * FROM integracao_log ORDER BY id DESC LIMIT 40`).all(),
+    ]);
+    const vinculados = await env.DB.prepare('SELECT COUNT(*) n FROM produtos WHERE tagplus_id IS NOT NULL').first('n');
+    return json({
+      configurado: tagplusConfigurado(env), webhook_configurado: !!env.TAGPLUS_WEBHOOK_SECRET,
+      conectado: !!token?.access_token, token_expira_em: token?.expira_em || null, refresh_expira_em: token?.refresh_expira_em || null,
+      conta, opcoes: { ...OPCOES_PADRAO, ...(opcoes || {}) }, ultima_sincronizacao: desde, produtos_vinculados: vinculados,
+      fila: Object.fromEntries(fila.results.map((f) => [f.status, f.n])),
+      erros_fila: (await env.DB.prepare(`SELECT id, tipo, ref_id, erro, tentativas, atualizado_em FROM integracao_fila WHERE status = 'erro' ORDER BY id DESC LIMIT 20`).all()).results,
+      log: log.results,
+      urls: { retorno: new URL('/api/tagplus/callback', url).toString(), webhook: new URL('/api/tagplus/webhook', url).toString() },
+    });
+  }
+  exigirTagplus(env);
+  if (acao === 'conectar' && m === 'GET') {
+    const exp = String(Date.now() + 15 * 60 * 1000);
+    return json({ url: urlAutorizacao(env, exp + '.' + (await hmac(segredo(env), 'tagplus' + exp))) });
+  }
+  if (acao === 'desconectar' && m === 'POST') {
+    await env.DB.prepare(`DELETE FROM integracao WHERE chave IN ('tagplus_token','tagplus_conta')`).run();
+    await registrar(env, 'tagplus', 'desconectado');
+    return json({ ok: true });
+  }
+  if (acao === 'opcoes' && m === 'PUT') {
+    const b = await req.json();
+    const atual = { ...OPCOES_PADRAO, ...((await lerChave(env, 'tagplus_opcoes')) || {}) };
+    for (const k of Object.keys(OPCOES_PADRAO)) if (k in b) atual[k] = k === 'formas_pagamento' ? b[k] || {} : k === 'tipo_nota' ? (b[k] === 'nfe' ? 'nfe' : 'nfce') : !!b[k];
+    await gravarChave(env, 'tagplus_opcoes', atual);
+    return json(atual);
+  }
+  if (acao === 'sincronizar' && m === 'POST') {
+    const { completo } = await req.json().catch(() => ({}));
+    try { return json(await sincronizarProdutos(env, { completo: !!completo })); }
+    catch (e) { throw new HttpError('Sincronização falhou: ' + e.message, 502); }
+  }
+  if (acao === 'processar-fila' && m === 'POST') return json(await processarFila(env, 25));
+  if (acao === 'reprocessar' && m === 'POST') {
+    await env.DB.prepare(`UPDATE integracao_fila SET status = 'pendente', tentativas = 0, proxima_em = datetime('now') WHERE status = 'erro'`).run();
+    return json(await processarFila(env, 25));
+  }
+  // Mostra o JSON real do TagPlus para conferir nomes de campos (src/tagplus/mapa.js)
+  if (acao === 'diagnostico' && m === 'GET') {
+    const recurso = url.searchParams.get('recurso') || 'produtos';
+    if (!/^(produtos|pedidos|nfces|nfes|clientes|formas_pagamento|categorias|webhooks|me)$/.test(recurso)) throw new HttpError('Recurso não permitido.');
+    const id = inteiro(url.searchParams.get('id'));
+    try {
+      const dados = recurso === 'me' ? await tagplusApi(env, 'GET', '/me')
+        : id ? await tagplusApi(env, 'GET', `/${recurso}/${id}`)
+        : await tagplusApi(env, 'GET', `/${recurso}`, { query: { per_page: 3, fields: '*' } });
+      return json({ recurso, dados });
+    } catch (e) { throw new HttpError(`TagPlus: ${e.message}`, 502); }
+  }
+  return erro('Rota não encontrada.', 404);
+}
+
+// Tarefa agendada (wrangler.toml → [triggers]): renova o token, processa a fila e busca produtos alterados
+async function agendado(env) {
+  if (!tagplusConfigurado(env)) return;
+  const token = await lerChave(env, 'tagplus_token');
+  if (!token?.refresh_token) return;
+  try {
+    // o refresh token vale 15 dias: renova com antecedência para nunca perder a conexão
+    if (token.expira_em - Date.now() < 30 * 60 * 1000 || token.refresh_expira_em - Date.now() < 3 * 86400 * 1000) await renovarToken(env, token);
+    await processarFila(env, 25);
+    const opc = { ...OPCOES_PADRAO, ...((await lerChave(env, 'tagplus_opcoes')) || {}) };
+    if (opc.sincronizar_automatico) await sincronizarProdutos(env, {});
+  } catch (e) {
+    await registrar(env, 'sistema', 'agendamento_falhou', { ok: false, detalhe: e.message });
+  }
+}
+
 export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(agendado(env));
+  },
   async fetch(req, env) {
     try {
       const r = await rotear(req, env);

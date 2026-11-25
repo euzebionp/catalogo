@@ -57,6 +57,13 @@ async function iniciar() {
     document.documentElement.style.setProperty('--pri', cfg.cor_primaria);
     document.documentElement.style.setProperty('--dest', cfg.cor_destaque);
     S.cats = await api('categorias');
+    const h = decodeURIComponent(location.hash || '');
+    if (h.startsWith('#integracao')) {
+      const msg = h.split('=')[1];
+      history.replaceState(null, '', location.pathname);
+      S.aba = 'integracao';
+      if (msg) toast(msg === 'ok' ? 'TagPlus conectado!' : '⚠ ' + msg);
+    }
     abrirAba(S.aba);
   } catch (e) { falha(e); }
 }
@@ -64,8 +71,9 @@ async function iniciar() {
 $('#abas').onclick = (e) => { const b = e.target.closest('[data-aba]'); if (b) abrirAba(b.dataset.aba); };
 function abrirAba(a) {
   S.aba = a;
+  C().onclick = null;
   document.querySelectorAll('#abas button').forEach((b) => b.classList.toggle('on', b.dataset.aba === a));
-  ({ pedidos: telaPedidos, produtos: telaProdutos, categorias: () => telaCrud('categorias'), regioes: () => telaCrud('regioes'), loja: telaLoja }[a])();
+  ({ pedidos: telaPedidos, produtos: telaProdutos, categorias: () => telaCrud('categorias'), regioes: () => telaCrud('regioes'), loja: telaLoja, integracao: telaIntegracao }[a])();
 }
 const C = () => $('#conteudo');
 
@@ -98,6 +106,15 @@ async function abrirPedido(id) {
     <div class="mini">${data(p.criado_em)}</div>
     <div><strong>${esc(p.cliente_nome)}</strong> · <a href="https://wa.me/${tel.length <= 11 ? '55' + tel : tel}" target="_blank" rel="noopener">${fone(p.cliente_telefone)} (WhatsApp)</a></div>
     <div>${p.recebimento === 'entrega' ? `<strong>Entrega</strong>${p.regiao_nome ? ' · ' + esc(p.regiao_nome) : ''}<br>${esc(p.endereco)}${p.referencia ? '<br>Ref.: ' + esc(p.referencia) : ''}` : '<strong>Retirada na loja</strong>'}</div>
+    ${p.cliente_cpf_cnpj ? `<div><strong>CPF/CNPJ na nota:</strong> ${esc(p.cliente_cpf_cnpj)}</div>` : ''}
+    <div class="secao" style="margin:0;padding:12px 14px"><strong>TagPlus</strong>
+      <div class="mini">Pedido no ERP: ${p.tagplus_pedido_id ? '#' + p.tagplus_pedido_id : p.erp_status === 'pendente' ? 'na fila' : p.erp_status === 'erro' ? '<span class="tag cancelado">erro (veja Integração)</span>' : 'não enviado'}
+      · Nota: ${p.nf_status ? `${(p.nf_tipo || '').toUpperCase()} ${p.nf_numero ? 'nº ' + esc(p.nf_numero) : ''} <span class="tag ${p.nf_status === 'autorizada' ? 'entregue' : p.nf_status === 'rejeitada' ? 'cancelado' : 'novo'}">${esc(p.nf_status)}</span>` : 'não emitida'}
+      ${p.nf_url ? ` · <a href="${esc(p.nf_url)}" target="_blank" rel="noopener">DANFE</a>` : ''}${p.nf_erro ? `<div class="mini" style="color:var(--err)">${esc(p.nf_erro)}</div>` : ''}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+        ${p.tagplus_pedido_id ? '' : '<button class="btn sec" style="width:auto" data-erp>Enviar ao TagPlus</button>'}
+        ${p.nf_status === 'autorizada' ? '' : '<button class="btn sec" style="width:auto" data-nota="nfce">Emitir NFC-e</button><button class="btn sec" style="width:auto" data-nota="nfe">Emitir NF-e</button>'}
+      </div></div>
     <div><strong>Pagamento:</strong> ${PAG[p.pagamento]}${p.troco_para ? ' · troco para ' + brl(p.troco_para) : ''}</div>
     ${p.observacoes ? `<div><strong>Obs.:</strong> ${esc(p.observacoes)}</div>` : ''}
     <table class="tab"><thead><tr><th>Item</th><th>Qtd</th><th>Total</th></tr></thead><tbody>
@@ -110,6 +127,17 @@ async function abrirPedido(id) {
     <button class="btn" data-salvar-status>Salvar status</button></div>`;
   dlg.onclick = async (e) => {
     if (e.target === dlg || e.target.matches('[data-x]')) return dlg.close();
+    if (e.target.matches('[data-erp]') || e.target.dataset.nota) {
+      e.target.disabled = true;
+      try {
+        const r = e.target.dataset.nota
+          ? await api(`pedidos/${id}/emitir-nota`, { method: 'POST', body: { tipo: e.target.dataset.nota } })
+          : await api(`pedidos/${id}/enviar-erp`, { method: 'POST' });
+        toast(r.fila?.falhas ? 'Enviado à fila, mas o TagPlus recusou. Veja a aba Integração.' : 'Enviado ao TagPlus');
+        dlg.close(); abrirPedido(id);
+      } catch (er) { falha(er); e.target.disabled = false; }
+      return;
+    }
     if (e.target.matches('[data-salvar-status]')) {
       try { await api('pedidos/' + id, { method: 'PUT', body: { status: $('#p-status').value } }); toast('Status atualizado'); dlg.close(); telaPedidos(); }
       catch (er) { falha(er); }
@@ -120,9 +148,10 @@ async function abrirPedido(id) {
 
 // --------------------------------------------------------------- produtos
 async function telaProdutos() {
-  C().innerHTML = `<div class="cab"><h2>Produtos</h2><input id="f-busca" type="search" placeholder="Buscar…" value="${esc(S.busca)}"><button class="btn" data-novo>+ Novo produto</button></div>
+  C().innerHTML = `<div class="cab"><h2>Produtos</h2><input id="f-busca" type="search" placeholder="Buscar…" value="${esc(S.busca)}"><label class="btn sec" style="width:auto;cursor:pointer">Importar planilha<input type="file" id="imp-arq" accept=".xlsx,.xls,.csv" hidden></label><a class="lnk" href="/modelo-importacao-catalogo.xlsx" download>Baixar modelo</a><button class="btn" data-novo>+ Novo produto</button></div>
     <div class="painel"><p class="vazio">Carregando…</p></div>`;
   $('#f-busca').oninput = (e) => { S.busca = e.target.value; listaProdutos(); };
+  $('#imp-arq').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) importarPlanilha(f); };
   try { S.produtos = await api('produtos'); listaProdutos(); } catch (e) { falha(e); }
 }
 function listaProdutos() {
@@ -156,6 +185,10 @@ function editorProduto(p) {
       <div class="campo c2"><label>Categoria</label><select name="categoria_id"><option value="">Sem categoria</option>${S.cats.map((c) => `<option value="${c.id}" ${p.categoria_id === c.id ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select></div>
       <div class="campo"><label>Marca</label><input name="marca" value="${esc(p.marca)}"></div>
       <div class="campo"><label>Código / SKU</label><input name="sku" value="${esc(p.sku)}"></div>
+      <div class="campo"><label>Código do produto (planilha)</label><input name="codigo" value="${esc(p.codigo)}"></div>
+      <div class="campo"><label>NCM</label><input name="ncm" value="${esc(p.ncm)}" inputmode="numeric" maxlength="10"></div>
+      <div class="campo"><label>CEST</label><input name="cest" value="${esc(p.cest)}" inputmode="numeric" maxlength="9"></div>
+      <div class="campo"><label>ID no TagPlus</label><input name="tagplus_id" value="${p.tagplus_id ?? ''}" inputmode="numeric" placeholder="vínculo com o ERP"></div>
       <div class="campo c4"><label>Descrição</label><textarea name="descricao" rows="4">${esc(p.descricao)}</textarea></div>
     </div></div>
 
@@ -163,6 +196,7 @@ function editorProduto(p) {
 
     <div class="secao"><h3>Preço e venda</h3><div class="form-grid">
       <div class="campo"><label>Preço (R$) *</label><input name="preco" value="${reais(p.preco)}" inputmode="decimal" placeholder="0,00" required></div>
+      <div class="campo"><label>Custo total (R$)</label><input name="custo" value="${reais(p.custo)}" inputmode="decimal" placeholder="da planilha"></div>
       <div class="campo"><label>Preço "de" (R$)</label><input name="preco_antigo" value="${reais(p.preco_antigo)}" inputmode="decimal" placeholder="opcional"></div>
       <div class="campo"><label>Unidade</label><input name="unidade" value="${esc(p.unidade)}" list="unids"><datalist id="unids"><option>un</option><option>cx</option><option>par</option><option>kit</option><option>pct</option><option>kg</option><option>fardo</option></datalist></div>
       <div class="campo"><label>Estoque</label><input name="estoque" value="${p.estoque ?? ''}" inputmode="numeric" placeholder="não controla"></div>
@@ -237,6 +271,7 @@ function editorProduto(p) {
       preco: cent(f.preco), preco_antigo: cent(f.preco_antigo), unidade: f.unidade,
       estoque: f.estoque === '' ? null : +f.estoque, qtd_minima: +f.qtd_minima || 1, multiplo: +f.multiplo || 1,
       ativo: !!f.ativo, destaque: !!f.destaque,
+      codigo: f.codigo, ncm: f.ncm, cest: f.cest, custo: cent(f.custo), tagplus_id: f.tagplus_id === '' ? null : +f.tagplus_id,
       imagens: st.imagens.map((i) => i.key),
       specs: st.specs,
       variacoes: st.variacoes.map((v) => ({ id: v.id, nome: v.nome, sku: v.sku, preco: cent(v.preco === null || typeof v.preco === 'number' ? reais(v.preco) : v.preco), estoque: v.estoque === '' || v.estoque == null ? null : +v.estoque })),
@@ -356,6 +391,104 @@ async function telaLoja() {
     for (const k of ['permite_entrega', 'permite_retirada', 'pix_ativo', 'aceita_cartao', 'aceita_dinheiro']) b[k] = fd.has(k);
     b.pedido_minimo = cent(b.pedido_minimo) || 0;
     try { const r = await api('config', { method: 'PUT', body: b }); $('#adm-nome').textContent = r.nome; toast('Configurações salvas'); telaLoja(); } catch (er) { falha(er); }
+  };
+}
+
+
+// --------------------------------------------------------------- importação da planilha
+async function importarPlanilha(arquivo) {
+  if (!window.XLSX) return toast('⚠ Leitor de planilhas não carregou. Recarregue a página.');
+  let linhas;
+  try {
+    const wb = XLSX.read(await arquivo.arrayBuffer(), { type: 'array' });
+    const aba = wb.Sheets['Importacao'] || wb.Sheets[wb.SheetNames[0]];
+    linhas = XLSX.utils.sheet_to_json(aba, { defval: '', raw: true }).filter((l) => String(l.codigo_produto || '').trim());
+  } catch (e) { return toast('⚠ Não consegui ler o arquivo: ' + e.message); }
+  if (!linhas.length) return toast('⚠ Nenhuma linha com "codigo_produto" na aba Importacao. Abra e salve a planilha no Excel antes de importar.');
+  const grupos = new Set(linhas.map((l) => String(l.codigo_produto).trim())).size;
+  if (!confirm(`Importar ${linhas.length} linha(s), ${grupos} produto(s)? Produtos com o mesmo código serão atualizados.`)) return;
+  toast('Importando…');
+  try {
+    const r = await api('importar', { method: 'POST', body: { linhas } });
+    const msg = `Importação concluída: ${r.criados} novo(s), ${r.atualizados} atualizado(s).` + (r.erros.length ? `\n\n${r.erros.length} linha(s) com problema:\n` + r.erros.slice(0, 15).join('\n') : '');
+    alert(msg);
+    telaProdutos();
+  } catch (e) { falha(e); }
+}
+
+// --------------------------------------------------------------- integração TagPlus
+const dataHora = (ms) => (ms ? new Date(ms).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '—');
+async function telaIntegracao() {
+  C().onclick = null;
+  C().innerHTML = '<div class="cab"><h2>Integração TagPlus</h2></div><p class="vazio">Carregando…</p>';
+  let st;
+  try { st = await api('tagplus/status'); } catch (e) { return falha(e); }
+  const o = st.opcoes, fila = st.fila || {};
+  const chk = (k, t) => `<label class="chk"><input type="checkbox" data-op="${k}" ${o[k] ? 'checked' : ''}> ${t}</label>`;
+  const PAGS = [['pix_chave', 'Pix (chave)'], ['pix_atendente', 'Pix (atendente)'], ['cartao', 'Cartão na entrega'], ['dinheiro', 'Dinheiro']];
+  C().innerHTML = `<div class="cab"><h2>Integração TagPlus</h2>
+      ${st.conectado ? '<span class="tag entregue">Conectado</span>' : st.configurado ? '<span class="tag novo">Não conectado</span>' : '<span class="tag cancelado">Não configurado</span>'}</div>
+    ${!st.configurado ? `<div class="secao"><h3>1. Cadastre o app no TagPlus</h3>
+      <p>Em <a href="https://developers.tagplus.com.br/" target="_blank" rel="noopener">developers.tagplus.com.br</a> → Cadastrar → Aplicativos → Novo App. Use como <strong>URL de retorno</strong>:</p>
+      <p><code>${esc(st.urls.retorno)}</code> <button class="lnk" data-copia="${esc(st.urls.retorno)}">copiar</button></p>
+      <p>Depois, na Cloudflare (Worker <em>catalogo</em> → Settings → Variables and Secrets), crie os segredos <code>TAGPLUS_CLIENT_ID</code> e <code>TAGPLUS_CLIENT_SECRET</code> com os dados do app.</p></div>` : ''}
+    <div class="secao"><h3>Conexão</h3>
+      ${st.conectado ? `<p>Conta: <strong>${esc(st.conta?.usuario || st.conta?.sistema || 'TagPlus')}</strong> · conectada em ${st.conta?.conectado_em ? new Date(st.conta.conectado_em).toLocaleString('pt-BR') : '—'}</p>
+        <p class="mini">Token renova sozinho. Acesso expira em ${dataHora(st.token_expira_em)} · renovação válida até ${dataHora(st.refresh_expira_em)}.</p>
+        <button class="lnk perigo" data-desconectar>Desconectar</button>`
+      : `<p class="mini">Você será levado ao TagPlus para informar o endereço do seu sistema (app.tagplus.com.br/SEU_SISTEMA) e autorizar o acesso.</p>
+        <button class="btn" style="width:auto" data-conectar ${st.configurado ? '' : 'disabled'}>Conectar ao TagPlus</button>`}
+    </div>
+    <div class="secao"><h3>Webhook (atualização em tempo real)</h3>
+      <p class="mini">No TagPlus: menu Extras → API → Webhook → nova integração. URL de callback:</p>
+      <p><code>${esc(st.urls.webhook)}</code> <button class="lnk" data-copia="${esc(st.urls.webhook)}">copiar</button></p>
+      <p class="mini">No campo X-Hub-Secret, use o mesmo valor do segredo <code>TAGPLUS_WEBHOOK_SECRET</code> do Worker ${st.webhook_configurado ? '(<span style="color:var(--ok)">configurado</span>)' : '(<span style="color:var(--err)">ainda não criado</span>)'}. Marque os eventos de produto, estoque, pedido, NF-e e NFC-e.</p></div>
+    <div class="secao"><h3>Produtos e estoque</h3>
+      <p>${st.produtos_vinculados} produto(s) vinculados ao TagPlus · última sincronização: ${esc(st.ultima_sincronizacao || 'nunca')}</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sec" style="width:auto" data-sync ${st.conectado ? '' : 'disabled'}>Buscar alterações agora</button>
+      <button class="btn sec" style="width:auto" data-sync-completo ${st.conectado ? '' : 'disabled'}>Sincronização completa</button></div></div>
+    <div class="secao"><h3>Regras</h3>
+      ${chk('enviar_ao_confirmar', 'Ao marcar o pedido como "Confirmado", enviar ao TagPlus')}
+      ${chk('emitir_nota_ao_confirmar', 'E já solicitar a nota fiscal')}
+      <div class="campo" style="max-width:260px"><label>Nota padrão</label><select data-op-sel="tipo_nota"><option value="nfce" ${o.tipo_nota !== 'nfe' ? 'selected' : ''}>NFC-e (consumidor)</option><option value="nfe" ${o.tipo_nota === 'nfe' ? 'selected' : ''}>NF-e</option></select></div>
+      ${chk('sincronizar_automatico', 'Buscar produtos alterados a cada 10 minutos')}
+      ${chk('manter_preco_catalogo', 'Manter o preço do catálogo (não sobrescrever com o do TagPlus)')}
+      ${chk('manter_nome_catalogo', 'Manter o nome do catálogo')}
+      ${chk('novos_ocultos', 'Produto novo vindo do TagPlus sem foto entra oculto')}
+      <h3 style="margin-top:14px">Formas de pagamento no TagPlus</h3><p class="mini">ID da forma de pagamento no TagPlus para cada opção do catálogo (veja em Diagnóstico → formas_pagamento). Vazio = o pedido vai sem fatura.</p>
+      <div class="form-grid">${PAGS.map(([k, t]) => `<div class="campo"><label>${t}</label><input data-fp="${k}" value="${esc(o.formas_pagamento?.[k] ?? '')}" inputmode="numeric"></div>`).join('')}</div>
+      <button class="btn" style="width:auto;margin-top:12px" data-salvar-op>Salvar regras</button></div>
+    <div class="secao"><h3>Fila</h3>
+      <p>Pendentes: ${fila.pendente || 0} · processando: ${fila.processando || 0} · concluídas: ${fila.ok || 0} · com erro: ${fila.erro || 0}</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sec" style="width:auto" data-fila>Processar agora</button>${fila.erro ? '<button class="btn sec" style="width:auto" data-reprocessar>Tentar de novo os com erro</button>' : ''}</div>
+      ${st.erros_fila.length ? `<table class="tab" style="margin-top:10px"><thead><tr><th>Tarefa</th><th>Ref.</th><th>Erro</th></tr></thead><tbody>${st.erros_fila.map((f) => `<tr><td>${esc(f.tipo)}</td><td>${esc(f.ref_id)}</td><td class="mini">${esc(f.erro)}</td></tr>`).join('')}</tbody></table>` : ''}</div>
+    <div class="secao"><h3>Diagnóstico</h3><p class="mini">Mostra o JSON que o TagPlus devolve, para conferir os nomes de campos usados em <code>src/tagplus/mapa.js</code>.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end"><div class="campo"><label>Recurso</label><select id="dg-rec">${['produtos', 'pedidos', 'nfces', 'nfes', 'clientes', 'formas_pagamento', 'categorias', 'webhooks', 'me'].map((r) => `<option>${r}</option>`).join('')}</select></div>
+      <div class="campo"><label>ID (opcional)</label><input id="dg-id" inputmode="numeric" style="width:120px"></div><button class="btn sec" style="width:auto" data-diag ${st.conectado ? '' : 'disabled'}>Consultar</button></div>
+      <pre id="dg-out" style="max-height:360px;overflow:auto;background:var(--bg);padding:10px;border-radius:8px;font-size:12px;display:none"></pre></div>
+    <div class="secao"><h3>Registro</h3>${st.log.length ? `<table class="tab"><thead><tr><th>Quando</th><th>Origem</th><th>Evento</th><th>Ref.</th><th>Detalhe</th></tr></thead><tbody>${st.log.map((l) => `<tr><td class="mini">${data(l.criado_em)}</td><td>${esc(l.origem)}</td><td>${l.ok ? '' : '⚠ '}${esc(l.evento)}</td><td class="mini">${esc(l.ref || '')}</td><td class="mini" style="max-width:360px;word-break:break-word">${esc((l.detalhe || '').slice(0, 220))}</td></tr>`).join('')}</tbody></table>` : '<p class="mini">Nada registrado ainda.</p>'}</div>`;
+
+  C().onclick = async (e) => {
+    const t = e.target, acao = async (fn, ok) => { t.disabled = true; try { const r = await fn(); if (ok) toast(ok(r)); telaIntegracao(); } catch (er) { falha(er); t.disabled = false; } };
+    if (t.dataset.copia) { navigator.clipboard?.writeText(t.dataset.copia); toast('Copiado'); }
+    if ('conectar' in t.dataset) { t.disabled = true; try { location.href = (await api('tagplus/conectar')).url; } catch (er) { falha(er); t.disabled = false; } }
+    if ('desconectar' in t.dataset && confirm('Desconectar do TagPlus? Pedidos e produtos param de sincronizar.')) acao(() => api('tagplus/desconectar', { method: 'POST' }), () => 'Desconectado');
+    if ('sync' in t.dataset) acao(() => api('tagplus/sincronizar', { method: 'POST', body: {} }), (r) => `${r.produtos} produto(s) atualizados`);
+    if ('syncCompleto' in t.dataset && confirm('Buscar todos os produtos do TagPlus? Pode levar alguns minutos.')) acao(() => api('tagplus/sincronizar', { method: 'POST', body: { completo: true } }), (r) => `${r.produtos} produto(s) sincronizados`);
+    if ('fila' in t.dataset) acao(() => api('tagplus/processar-fila', { method: 'POST' }), (r) => `${r.processadas} tarefa(s) processadas`);
+    if ('reprocessar' in t.dataset) acao(() => api('tagplus/reprocessar', { method: 'POST' }), (r) => `${r.ok || 0} ok, ${r.falhas || 0} com erro`);
+    if ('salvarOp' in t.dataset) {
+      const b = { formas_pagamento: {} };
+      C().querySelectorAll('[data-op]').forEach((i) => (b[i.dataset.op] = i.checked));
+      C().querySelectorAll('[data-op-sel]').forEach((i) => (b[i.dataset.opSel] = i.value));
+      C().querySelectorAll('[data-fp]').forEach((i) => { if (i.value.trim()) b.formas_pagamento[i.dataset.fp] = +i.value; });
+      acao(() => api('tagplus/opcoes', { method: 'PUT', body: b }), () => 'Regras salvas');
+    }
+    if ('diag' in t.dataset) {
+      const out = $('#dg-out'); out.style.display = 'block'; out.textContent = 'Consultando…';
+      try { const r = await api(`tagplus/diagnostico?recurso=${$('#dg-rec').value}${$('#dg-id').value ? '&id=' + $('#dg-id').value : ''}`); out.textContent = JSON.stringify(r.dados, null, 2); }
+      catch (er) { out.textContent = er.message; }
+    }
   };
 }
 

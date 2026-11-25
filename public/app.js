@@ -270,6 +270,7 @@ function renderCarrinho() {
       <fieldset><legend>Seus dados</legend>
         <div class="campo"><label for="f-nome">Nome</label><input id="f-nome" name="nome" value="${esc(c.nome)}" autocomplete="name"></div>
         <div class="campo"><label for="f-tel">WhatsApp / telefone</label><input id="f-tel" name="telefone" value="${esc(c.telefone)}" inputmode="tel" autocomplete="tel" placeholder="(00) 00000-0000"></div>
+        <div class="campo"><label for="f-doc">CPF ou CNPJ na nota (opcional)</label><input id="f-doc" name="cpf_cnpj" value="${esc(c.cpf_cnpj)}" inputmode="numeric" autocomplete="off"></div>
       </fieldset>
       <fieldset><legend>Pagamento</legend><div class="opcoes">
         ${pagOpts.map(([v, t, d]) => `<label class="opcao"><input type="radio" name="pagamento" value="${v}" ${c.pagamento === v ? 'checked' : ''}><span>${t}${d ? `<small>${d}</small>` : ''}</span></label>`).join('')}
@@ -308,6 +309,8 @@ async function enviarPedido() {
     if (!c.endereco || c.endereco.trim().length < 5) return err('Informe o endereço de entrega.');
   }
   if (!c.pagamento) return err('Escolha a forma de pagamento.');
+  const doc = (c.cpf_cnpj || '').replace(/\D/g, '');
+  if (doc && doc.length !== 11 && doc.length !== 14) return err('CPF deve ter 11 dígitos e CNPJ, 14.');
 
   S.enviando = true; renderCarrinho();
   try {
@@ -315,7 +318,7 @@ async function enviarPedido() {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         itens: k.ls.map((i) => ({ produto_id: i.pid, variacao_id: i.vid, quantidade: i.qtd })),
-        nome: c.nome, telefone: c.telefone, recebimento: k.receb, regiao_id: c.regiao_id || null,
+        nome: c.nome, telefone: c.telefone, cpf_cnpj: c.cpf_cnpj, recebimento: k.receb, regiao_id: c.regiao_id || null,
         endereco: c.endereco, referencia: c.referencia, pagamento: c.pagamento,
         troco_para: c.troco ? Math.round(parseFloat(String(c.troco).replace(/\./g, '').replace(',', '.')) * 100) || null : null,
         observacoes: c.observacoes,

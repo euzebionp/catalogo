@@ -29,3 +29,9 @@ enabled = true
 # Segredos (cadastrados no painel da Cloudflare, nunca neste arquivo):
 #   ADMIN_PASSWORD  -> senha do painel /admin
 #   SESSION_SECRET  -> texto aleatório longo
+#   TAGPLUS_CLIENT_ID, TAGPLUS_CLIENT_SECRET -> app cadastrado em developers.tagplus.com.br
+#   TAGPLUS_WEBHOOK_SECRET -> mesmo valor do campo X-Hub-Secret do webhook no TagPlus
+
+[triggers]
+# a cada 10 minutos: renova o token do TagPlus, processa a fila e busca produtos alterados
+crons = ["*/10 * * * *"]

@@ -125,8 +125,37 @@ Migrações futuras: `npm run db:remoto`.
 ### Fotos: KV ou R2
 O projeto usa o KV porque ele é gratuito e não pede cartão. O plano grátis tem 1 GB e mil gravações por dia, o que basta para um catálogo. Se você ativar o R2 no painel, troque o bloco `[[kv_namespaces]]` pelo `[[r2_buckets]]` comentado no `wrangler.toml`. O código aceita os dois.
 
+## Importar produtos por planilha
+
+1. Baixe o modelo no painel (Produtos → Baixar modelo) ou em `/modelo-importacao-catalogo.xlsx`.
+2. Preencha `Parametros`, `NCM` e `Formacao_Preco` no Excel ou LibreOffice e **salve**. Salvar é o que grava os valores calculados.
+3. No painel, vá em Produtos → Importar planilha. O sistema lê a aba `Importacao`:
+   - linhas com o mesmo `codigo_produto` viram um produto com variações;
+   - reimportar atualiza os produtos, sem duplicar.
+
+A planilha calcula, a partir de MG: a alíquota da nota de compra (12% de qualquer estado, 4% para importados), a antecipação do ICMS do Simples Nacional (fórmula da SEF/MG), o ICMS-ST com MVA ajustada, o crédito de ICMS no regime normal, o DAS efetivo do Anexo I e o preço sugerido com margem e despesas.
+
+## Integração com o TagPlus
+
+O TagPlus é a fonte de produtos, preços, estoque e notas fiscais. Arquivos: `src/tagplus/cliente.js` (OAuth2 e chamadas), `src/tagplus/sync.js` (fila, sincronização, pedidos e notas) e `src/tagplus/mapa.js` (nomes de campos).
+
+| Fluxo | Como acontece |
+|---|---|
+| Produtos e estoque → catálogo | Webhook do TagPlus em tempo real, mais uma busca a cada 10 min (`since`) |
+| Pedido → TagPlus | Ao marcar "Confirmado" no painel, ou pelo botão no pedido. Cria o cliente se ele não existir |
+| Nota fiscal | Botão "Emitir NFC-e/NF-e" no pedido. O status volta pelo webhook e pela fila |
+| Falhas | Fila com nova tentativa (2, 4, 8… min). Erros e registro na aba Integração |
+
+Para ativar:
+1. Em [developers.tagplus.com.br](https://developers.tagplus.com.br/), cadastre um app. A URL de retorno é `https://<seu-dominio>/api/tagplus/callback`.
+2. Na Cloudflare (Worker → Settings → Variables and Secrets), crie os segredos `TAGPLUS_CLIENT_ID`, `TAGPLUS_CLIENT_SECRET` e `TAGPLUS_WEBHOOK_SECRET`.
+3. No painel → Integração → Conectar ao TagPlus.
+4. No TagPlus → Extras → API → Webhook, cadastre `https://<seu-dominio>/api/tagplus/webhook` com o mesmo `X-Hub-Secret` e marque os eventos de produto, estoque, pedido, NF-e e NFC-e.
+5. Em Integração → Diagnóstico, confira o JSON real de `produtos`, `pedidos` e `nfces` e ajuste o que estiver marcado `CONFIRMAR` em `src/tagplus/mapa.js`.
+
+O usuário do TagPlus que autoriza o app precisa da permissão "Modificar o Valor Unitário nas vendas". A emissão de NFC-e exige CSC, série e certificado configurados no próprio TagPlus.
+
 ## Próximos passos possíveis
 
-- Importar produtos de planilha ou de um ERP. O site de referência sincroniza os produtos do TagPlus.
 - Cupom de desconto e frete grátis na primeira compra.
 - Vários usuários no painel, com permissões.
