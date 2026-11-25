@@ -85,6 +85,17 @@ O DDL completo está em `migrations/0001_schema.sql`.
 6. Se o cliente escolheu **Pix pela chave**, a tela mostra o QR Code, o código copia e cola com valor e número do pedido, a chave cadastrada e o favorecido. Se escolheu **Pix com atendente**, a mensagem avisa a loja para mandar os dados de pagamento.
 7. No painel, a loja acompanha o status do pedido. Um pedido cancelado devolve os itens ao estoque.
 
+## Condicional (lojas de roupa)
+
+Liga em **Painel → Loja → Condicional**, onde se define o prazo de devolução e as regras que o cliente vê.
+
+1. No carrinho, o cliente escolhe **Compra** ou **Condicional — levar para provar**.
+2. O condicional (código `C…`) vai para o WhatsApp da loja como os outros pedidos, marcado como CONDICIONAL e com a data de devolução. **Não baixa o estoque**, não gera Pix com valor e não vai ao TagPlus.
+3. Quando o cliente devolver, abra o condicional em **Pedidos → Condicionais em aberto**. Em "Ficou", informe quantas peças de cada item ele ficou e clique em **Efetivar venda**. O sistema gera um pedido de venda (código do condicional + `V`) só com essas peças: ele baixa o estoque, nasce como "Confirmado" e segue para o TagPlus se a integração estiver ligada. Se o cliente devolveu tudo, use **Cliente devolveu tudo**.
+4. O condicional fica guardado com o que o cliente ficou, ligado à venda gerada, e a ação fica no registro de auditoria.
+
+As peças em condicional continuam aparecendo como disponíveis no estoque até a efetivação.
+
 ## API
 
 | Rota | Uso |

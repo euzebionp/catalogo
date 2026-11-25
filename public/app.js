@@ -238,8 +238,10 @@ function renderCarrinho() {
     return;
   }
   const pg = L.pagamentos;
+  const cond = !!(L.condicional && c.tipo === 'condicional');
+  if (!L.condicional) c.tipo = 'venda';
   const pagOpts = [
-    pg.pix_chave && ['pix_chave', 'Pix — pagar agora', 'Você recebe a chave Pix e o código copia e cola ao enviar o pedido.'],
+    !cond && pg.pix_chave && ['pix_chave', 'Pix — pagar agora', 'Você recebe a chave Pix e o código copia e cola ao enviar o pedido.'],
     pg.pix_atendente && ['pix_atendente', 'Pix — combinar com o atendente', 'A loja confirma o pedido e envia os dados do Pix pelo WhatsApp.'],
     pg.cartao && ['cartao', 'Cartão na entrega', 'Débito ou crédito na maquininha.'],
     pg.dinheiro && ['dinheiro', 'Dinheiro', ''],
@@ -255,6 +257,10 @@ function renderCarrinho() {
       <div><div class="t">${brl(i.total)}</div><button class="rm" data-rm="${i.pid}:${i.vid || 0}">Remover</button></div>
     </div>`).join('')}
     <form id="form-pedido" novalidate>
+      ${L.condicional ? `<fieldset><legend>Tipo de pedido</legend><div class="opcoes">
+        <label class="opcao"><input type="radio" name="tipo" value="venda" ${!cond ? 'checked' : ''}><span>Compra<small>Pedido normal: as peças são suas.</small></span></label>
+        <label class="opcao"><input type="radio" name="tipo" value="condicional" ${cond ? 'checked' : ''}><span>Condicional — levar para provar<small>Você prova em casa, devolve em até ${L.condicional.prazo_dias} ${L.condicional.prazo_dias > 1 ? 'dias' : 'dia'} o que não quiser e paga só o que ficar.</small></span></label>
+      </div>${cond && L.condicional.regras ? `<p class="obs">${esc(L.condicional.regras)}</p>` : ''}</fieldset>` : ''}
       ${L.permite_entrega && L.permite_retirada ? `<fieldset><legend>Como receber</legend><div class="opcoes duas">
         <label class="opcao"><input type="radio" name="recebimento" value="entrega" ${k.receb === 'entrega' ? 'checked' : ''}> Entrega</label>
         <label class="opcao"><input type="radio" name="recebimento" value="retirada" ${k.receb === 'retirada' ? 'checked' : ''}> Retirar na loja</label>
@@ -284,11 +290,12 @@ function renderCarrinho() {
   pe.innerHTML = `
     <div class="resumo"><span>Subtotal</span><span>${brl(k.subtotal)}</span>
       ${k.receb === 'entrega' ? `<span>Entrega</span><span>${k.reg ? (k.taxa ? brl(k.taxa) : 'Grátis') : '—'}</span>` : ''}
-      <span class="tot">Total</span><span class="tot">${brl(k.total)}</span></div>
+      <span class="tot">${cond ? 'Total das peças' : 'Total'}</span><span class="tot">${brl(k.total)}</span></div>
+    ${cond ? '<p class="obs" style="margin:0 0 8px">Condicional: nada é cobrado agora. A loja confirma pelo WhatsApp e você paga só o que ficar.</p>' : ''}
     ${k.faltaMin ? `<p class="alerta">Pedido mínimo para entrega: ${brl(L.pedido_minimo)}. Faltam ${brl(k.faltaMin)}.</p>` : ''}
     ${L.horario ? `<p class="obs" style="margin:0 0 8px">Atendimento: ${esc(L.horario)}</p>` : ''}
     <p class="erro-msg" id="erro-pedido" hidden></p>
-    <button class="btn wpp" id="enviar" ${k.faltaMin || S.enviando ? 'disabled' : ''}>${S.enviando ? 'Enviando…' : 'Enviar pedido pelo WhatsApp'}</button>`;
+    <button class="btn wpp" id="enviar" ${k.faltaMin || S.enviando ? 'disabled' : ''}>${S.enviando ? 'Enviando…' : cond ? 'Enviar condicional pelo WhatsApp' : 'Enviar pedido pelo WhatsApp'}</button>`;
 }
 
 function lerForm() {
@@ -321,6 +328,7 @@ async function enviarPedido() {
         itens: k.ls.map((i) => ({ produto_id: i.pid, variacao_id: i.vid, quantidade: i.qtd })),
         nome: c.nome, telefone: c.telefone, cpf_cnpj: c.cpf_cnpj, recebimento: k.receb, regiao_id: c.regiao_id || null,
         endereco: c.endereco, referencia: c.referencia, pagamento: c.pagamento,
+        tipo: S.loja.condicional && c.tipo === 'condicional' ? 'condicional' : 'venda',
         troco_para: c.troco ? Math.round(parseFloat(String(c.troco).replace(/\./g, '').replace(',', '.')) * 100) || null : null,
         observacoes: c.observacoes,
       }),
@@ -349,8 +357,10 @@ function renderConfirmacao() {
   }
   $('#gaveta-corpo').innerHTML = `<div class="conf">
     <div class="ok">✓</div>
-    <h3>Pedido ${esc(j.codigo)} gerado!</h3>
-    <p class="obs">Envie a mensagem no WhatsApp da loja para confirmar. Total: <strong>${brl(j.total)}</strong></p>
+    <h3>${j.tipo === 'condicional' ? 'Condicional' : 'Pedido'} ${esc(j.codigo)} gerado!</h3>
+    <p class="obs">Envie a mensagem no WhatsApp da loja para confirmar. ${j.tipo === 'condicional'
+      ? `Total das peças: <strong>${brl(j.total)}</strong>. Devolução até ${esc(String(j.condicional_prazo).split('-').reverse().join('/'))}; você paga só o que ficar.`
+      : `Total: <strong>${brl(j.total)}</strong>`}</p>
     <a class="btn wpp" href="${esc(j.whatsapp_url)}" target="_blank" rel="noopener">Abrir WhatsApp</a>
     ${j.pix ? `<div class="pix">
       <strong>Pague com Pix</strong>
@@ -408,7 +418,7 @@ $('#ordem').onchange = (e) => { S.ordem = e.target.value; renderGrade(); };
 $('#gaveta').addEventListener('change', (e) => {
   if (!e.target.closest('#form-pedido')) return;
   lerForm();
-  if (['recebimento', 'regiao_id', 'pagamento'].includes(e.target.name)) renderCarrinho();
+  if (['recebimento', 'regiao_id', 'pagamento', 'tipo'].includes(e.target.name)) renderCarrinho();
 });
 $('#gaveta').addEventListener('input', (e) => { if (e.target.closest('#form-pedido')) lerForm(); });
 $('#gaveta').addEventListener('click', (e) => { if (e.target.id === 'enviar') enviarPedido(); });

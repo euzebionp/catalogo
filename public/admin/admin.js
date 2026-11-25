@@ -19,6 +19,8 @@ const S = { aba: 'pedidos', cats: [], produtos: [], busca: '', filtroStatus: '',
 const pode = (acao) => !!S.eu?.permissoes?.includes(acao);
 
 const STATUS = { novo: 'Novo', confirmado: 'Confirmado', pago: 'Pago', preparando: 'Preparando', saiu: 'Saiu p/ entrega', entregue: 'Entregue', cancelado: 'Cancelado' };
+const COND = { aberto: 'em aberto', efetivado: 'virou venda', devolvido: 'devolvido' };
+const dataBr = (d) => (d ? String(d).slice(0, 10).split('-').reverse().join('/') : '');
 const PAG = { pix_chave: 'Pix (chave)', pix_atendente: 'Pix (atendente)', cartao: 'Cartão na entrega', dinheiro: 'Dinheiro' };
 
 async function api(path, opt = {}) {
@@ -150,13 +152,13 @@ const C = () => $('#conteudo');
 // --------------------------------------------------------------- pedidos
 async function telaPedidos() {
   C().innerHTML = `<div class="cab"><h2>Pedidos</h2>
-    <select id="f-status"><option value="">Todos os status</option>${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${S.filtroStatus === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+    <select id="f-status"><option value="">Todos os status</option><option value="condicional" ${S.filtroStatus === 'condicional' ? 'selected' : ''}>Condicionais em aberto</option>${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${S.filtroStatus === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
     <div class="painel"><p class="vazio">Carregando…</p></div>`;
   $('#f-status').onchange = (e) => { S.filtroStatus = e.target.value; telaPedidos(); };
   try {
     const l = await api('pedidos' + (S.filtroStatus ? '?status=' + S.filtroStatus : ''));
     $('.painel', C()).innerHTML = l.length ? `<table class="tab"><thead><tr><th>Pedido</th><th>Cliente</th><th class="hm">Recebimento</th><th class="hm">Pagamento</th><th>Total</th><th>Status</th></tr></thead><tbody>
-      ${l.map((p) => `<tr class="clic" data-ped="${p.id}"><td><strong>${esc(p.codigo)}</strong><div class="mini">${data(p.criado_em)}</div></td>
+      ${l.map((p) => `<tr class="clic" data-ped="${p.id}"><td><strong>${esc(p.codigo)}</strong>${p.tipo === 'condicional' ? ` <span class="tag ${p.condicional_status === 'aberto' ? 'novo' : p.condicional_status === 'efetivado' ? 'entregue' : 'cancelado'}">Condicional · ${COND[p.condicional_status] || ''}</span>` : ''}<div class="mini">${data(p.criado_em)}</div></td>
         <td>${esc(p.cliente_nome)}<div class="mini">${fone(p.cliente_telefone)}</div></td>
         <td class="hm">${p.recebimento === 'entrega' ? 'Entrega' + (p.regiao_nome ? ' · ' + esc(p.regiao_nome) : '') : 'Retirada'}</td>
         <td class="hm">${PAG[p.pagamento]}</td><td><strong>${brl(p.total)}</strong><div class="mini">${p.qtd_itens} itens</div></td>
@@ -170,10 +172,17 @@ async function abrirPedido(id) {
   if (!p) return;
   const dlg = $('#dlg');
   const tel = String(p.cliente_telefone).replace(/\D/g, '');
+  const abertoC = p.tipo === 'condicional' && p.condicional_status === 'aberto' && p.status !== 'cancelado';
+  const cols = p.tipo === 'condicional' ? 3 : 2;
   dlg.innerHTML = `<div class="ped">
     <button class="fechar" data-x>×</button>
-    <h3>Pedido ${esc(p.codigo)}</h3>
+    <h3>${p.tipo === 'condicional' ? 'Condicional' : 'Pedido'} ${esc(p.codigo)}</h3>
     <div class="mini">${data(p.criado_em)}</div>
+    ${p.condicional_id ? `<div class="mini">Venda gerada do condicional <a href="#" data-abrir="${p.condicional_id}">ver condicional</a></div>` : ''}
+    ${p.tipo === 'condicional' ? `<div class="secao" style="margin:0;padding:12px 14px;border-left:4px solid var(--cor, #b53b82)">
+      <strong>Condicional ${COND[p.condicional_status] || ''}</strong>
+      <div class="mini">Peças para provar, <strong>sem baixa no estoque</strong>. Devolução até ${dataBr(p.condicional_prazo)}.
+      ${p.venda_id ? ` · <a href="#" data-abrir="${p.venda_id}">abrir a venda gerada</a>` : ''}</div></div>` : ''}
     <div><strong>${esc(p.cliente_nome)}</strong> · <a href="https://wa.me/${tel.length <= 11 ? '55' + tel : tel}" target="_blank" rel="noopener">${fone(p.cliente_telefone)} (WhatsApp)</a></div>
     <div>${p.recebimento === 'entrega' ? `<strong>Entrega</strong>${p.regiao_nome ? ' · ' + esc(p.regiao_nome) : ''}<br>${esc(p.endereco)}${p.referencia ? '<br>Ref.: ' + esc(p.referencia) : ''}` : '<strong>Retirada na loja</strong>'}</div>
     ${p.cliente_cpf_cnpj ? `<div><strong>CPF/CNPJ na nota:</strong> ${esc(p.cliente_cpf_cnpj)}</div>` : ''}
@@ -187,16 +196,41 @@ async function abrirPedido(id) {
       </div></div>
     <div><strong>Pagamento:</strong> ${PAG[p.pagamento]}${p.troco_para ? ' · troco para ' + brl(p.troco_para) : ''}</div>
     ${p.observacoes ? `<div><strong>Obs.:</strong> ${esc(p.observacoes)}</div>` : ''}
-    <table class="tab"><thead><tr><th>Item</th><th>Qtd</th><th>Total</th></tr></thead><tbody>
-      ${p.itens.map((i) => `<tr><td>${esc(i.nome)}${i.variacao ? `<div class="mini">${esc(i.variacao)}</div>` : ''}<div class="mini">${brl(i.preco_unit)} /${esc(i.unidade)}</div></td><td>${i.quantidade}</td><td>${brl(i.total)}</td></tr>`).join('')}
-      <tr><td colspan="2">Subtotal</td><td>${brl(p.subtotal)}</td></tr>
-      ${p.recebimento === 'entrega' ? `<tr><td colspan="2">Entrega</td><td>${p.taxa_entrega ? brl(p.taxa_entrega) : 'Grátis'}</td></tr>` : ''}
-      <tr><td colspan="2"><strong>Total</strong></td><td><strong>${brl(p.total)}</strong></td></tr></tbody></table>
+    <table class="tab"><thead><tr><th>Item</th><th>Qtd</th>${p.tipo === 'condicional' ? '<th>Ficou</th>' : ''}<th>Total</th></tr></thead><tbody>
+      ${p.itens.map((i) => `<tr><td>${esc(i.nome)}${i.variacao ? `<div class="mini">${esc(i.variacao)}</div>` : ''}<div class="mini">${brl(i.preco_unit)} /${esc(i.unidade)}</div></td><td>${i.quantidade}</td>${
+        p.tipo !== 'condicional' ? '' : abertoC ? `<td><input type="number" class="ficou" data-item="${i.id}" data-preco="${i.preco_unit}" min="0" max="${i.quantidade}" value="${i.quantidade}" style="width:64px"></td>` : `<td>${i.qtd_ficou ?? '—'}</td>`
+      }<td>${brl(i.total)}</td></tr>`).join('')}
+      <tr><td colspan="${cols}">Subtotal</td><td>${brl(p.subtotal)}</td></tr>
+      ${p.recebimento === 'entrega' ? `<tr><td colspan="${cols}">Entrega</td><td>${p.taxa_entrega ? brl(p.taxa_entrega) : 'Grátis'}</td></tr>` : ''}
+      <tr><td colspan="${cols}"><strong>Total</strong></td><td><strong>${brl(p.total)}</strong></td></tr></tbody></table>
+    ${abertoC ? `<div class="secao" id="bloco-cond" style="margin:0;padding:12px 14px"><strong>Fechar o condicional</strong>
+      <p class="mini">Informe em "Ficou" quantas peças de cada item o cliente ficou (0 = devolveu). Ao efetivar, é gerado um pedido de venda com essas peças: só ele baixa o estoque e segue para o TagPlus.</p>
+      <div class="form-grid"><div class="campo c2"><label>Pagamento da venda</label><select id="c-pag">${Object.entries(PAG).map(([k, v]) => `<option value="${k}" ${p.pagamento === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div></div>
+      ${p.taxa_entrega ? `<label class="chk"><input type="checkbox" id="c-taxa" checked> Cobrar a entrega (${brl(p.taxa_entrega)})</label>` : ''}
+      <div class="mini" id="c-total"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+        <button class="btn" style="width:auto" data-efetivar>Efetivar venda</button>
+        <button class="btn sec" style="width:auto" data-devolver>Cliente devolveu tudo</button></div></div>` : ''}
     <div class="campo"><label for="p-status">Status</label><select id="p-status">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${p.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
-    <p class="mini">Cancelar devolve ao estoque os itens com estoque controlado.</p>
+    <p class="mini">${p.tipo === 'condicional' ? 'O condicional não mexe no estoque; o status serve só para acompanhar a entrega e a devolução.' : 'Cancelar devolve ao estoque os itens com estoque controlado.'}</p>
     <button class="btn" data-salvar-status>Salvar status</button></div>`;
   dlg.onclick = async (e) => {
     if (e.target === dlg || e.target.matches('[data-x]')) return dlg.close();
+    if (e.target.dataset.abrir) { e.preventDefault(); dlg.close(); return abrirPedido(+e.target.dataset.abrir); }
+    if (e.target.matches('[data-efetivar],[data-devolver]')) {
+      const devolver = e.target.matches('[data-devolver]');
+      const ficou = Object.fromEntries([...dlg.querySelectorAll('.ficou')].map((x) => [x.dataset.item, +x.value || 0]));
+      const pecas = Object.values(ficou).reduce((a, b) => a + b, 0);
+      if (!devolver && !pecas) return toast('Nenhuma peça ficou. Use "Cliente devolveu tudo".');
+      if (!confirm(devolver ? 'Confirmar que o cliente devolveu todas as peças?' : `Gerar a venda com ${pecas} peça(s)? O estoque será baixado.`)) return;
+      e.target.disabled = true;
+      try {
+        const r = await api(`pedidos/${id}/condicional`, { method: 'POST', body: { acao: devolver ? 'devolver' : 'efetivar', ficou, pagamento: $('#c-pag')?.value, cobrar_entrega: $('#c-taxa') ? $('#c-taxa').checked : true } });
+        toast(r.devolvido ? 'Condicional encerrado: tudo devolvido' : `Venda ${r.venda_codigo} gerada: ${brl(r.total)}`);
+        dlg.close(); telaPedidos(); if (r.venda_id) abrirPedido(r.venda_id);
+      } catch (er) { falha(er); e.target.disabled = false; }
+      return;
+    }
     if (e.target.matches('[data-erp]') || e.target.dataset.nota) {
       e.target.disabled = true;
       try {
@@ -213,7 +247,11 @@ async function abrirPedido(id) {
       catch (er) { falha(er); }
     }
   };
-  if (!pode('pedidos.erp')) $('#bloco-erp')?.remove();
+  if (!pode('pedidos.erp') || p.tipo === 'condicional') $('#bloco-erp')?.remove();
+  const somaC = () => { const t = $('#c-total'); if (!t) return;
+    const v = [...dlg.querySelectorAll('.ficou')].reduce((s, x) => s + Math.min(+x.max, Math.max(0, +x.value || 0)) * +x.dataset.preco, 0);
+    t.innerHTML = `Venda: <strong>${brl(v + ($('#c-taxa')?.checked ? p.taxa_entrega : 0))}</strong>`; };
+  dlg.oninput = somaC; dlg.onchange = somaC; somaC();
   dlg.showModal();
 }
 
@@ -435,6 +473,13 @@ async function telaLoja() {
     <div class="secao"><h3>Entrega e retirada</h3><div class="form-grid">
       <div class="campo"><label>Pedido mínimo p/ entrega (R$)</label><input name="pedido_minimo" value="${reais(c.pedido_minimo)}" inputmode="decimal"></div></div>
       ${chk('permite_entrega', 'Fazemos entrega')}${chk('permite_retirada', 'Cliente pode retirar na loja')}</div>
+    <div class="secao"><h3>Condicional</h3>
+      ${chk('condicional_ativo', 'Oferecer condicional no carrinho (cliente leva para provar e paga só o que ficar)')}
+      <div class="form-grid">
+        <div class="campo"><label>Prazo para devolver (dias)</label><input name="condicional_prazo_dias" type="number" min="1" max="30" value="${c.condicional_prazo_dias ?? 2}"></div>
+        ${inp('condicional_regras', 'Regras mostradas ao cliente (opcional)', 'placeholder="Até 6 peças. Devolver com etiqueta e sem uso."', 'c2')}
+      </div>
+      <p class="mini">O condicional chega no WhatsApp como os outros pedidos, mas não baixa o estoque. Quando o cliente devolver, abra o condicional em Pedidos, marque o que ficou e clique em "Efetivar venda".</p></div>
     <div class="secao"><h3>Pagamento</h3>
       ${chk('pix_ativo', 'Aceitar Pix')}
       <div class="form-grid">
@@ -460,7 +505,7 @@ async function telaLoja() {
     e.preventDefault();
     const fd = new FormData(e.target);
     const b = Object.fromEntries(fd);
-    for (const k of ['permite_entrega', 'permite_retirada', 'pix_ativo', 'aceita_cartao', 'aceita_dinheiro']) b[k] = fd.has(k);
+    for (const k of ['permite_entrega', 'permite_retirada', 'pix_ativo', 'aceita_cartao', 'aceita_dinheiro', 'condicional_ativo']) b[k] = fd.has(k);
     b.pedido_minimo = cent(b.pedido_minimo) || 0;
     try { const r = await api('config', { method: 'PUT', body: b }); $('#adm-nome').textContent = r.nome; toast('Configurações salvas'); telaLoja(); } catch (er) { falha(er); }
   };

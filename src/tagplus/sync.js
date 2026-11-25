@@ -142,6 +142,7 @@ async function garantirCliente(env, pedido) {
 
 export async function enviarPedido(env, pedidoId) {
   const pedido = await env.DB.prepare('SELECT * FROM pedidos WHERE id = ?').bind(pedidoId).first();
+  if (pedido?.tipo === 'condicional') throw new Error('Condicional não vai ao ERP; envie o pedido de venda gerado na efetivação.');
   if (!pedido) throw new Error('Pedido não encontrado.');
   if (pedido.tagplus_pedido_id) return pedido.tagplus_pedido_id;
   const { results: itens } = await env.DB.prepare(`SELECT i.*, p.tagplus_id AS tagplus_produto_id, v.tagplus_id AS tagplus_variacao_id

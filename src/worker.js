@@ -219,6 +219,7 @@ function configPublica(c) {
       cartao: !!c.aceita_cartao,
       dinheiro: !!c.aceita_dinheiro,
     },
+    condicional: c.condicional_ativo ? { prazo_dias: c.condicional_prazo_dias, regras: c.condicional_regras || null } : null,
   };
 }
 
@@ -282,6 +283,11 @@ async function criarPedido(req, env) {
   const pagamento = b.pagamento;
   if (!pub.pagamentos[pagamento]) throw new HttpError('Forma de pagamento indisponível.');
 
+  // Condicional: o cliente leva para provar; não baixa estoque e não gera Pix com valor
+  const condicional = b.tipo === 'condicional';
+  if (condicional && !pub.condicional) throw new HttpError('A loja não está trabalhando com condicional.');
+  if (condicional && pagamento === 'pix_chave') throw new HttpError('No condicional o pagamento é combinado depois, só das peças que ficarem.');
+
   // Recalcula tudo pelo banco — nunca confia no preço vindo do navegador
   const prodIds = [...new Set(b.itens.map((i) => inteiro(i.produto_id)).filter(Boolean))];
   const ph = prodIds.map(() => '?').join(',');
@@ -338,23 +344,26 @@ async function criarPedido(req, env) {
      RETURNING id`).bind(nome, telefone, endereco || null, referencia || null, cpfCnpj || null).first();
 
   const agora = new Date(Date.now() - 3 * 3600e3); // horário de Brasília
-  const codigo = 'P' + agora.toISOString().slice(2, 10).replace(/-/g, '') + '-' +
+  const prazo = condicional ? new Date(agora.getTime() + pub.condicional.prazo_dias * 86400e3).toISOString().slice(0, 10) : null;
+  const codigo = (condicional ? 'C' : 'P') + agora.toISOString().slice(2, 10).replace(/-/g, '') + '-' +
     Math.random().toString(36).slice(2, 6).toUpperCase();
 
   const ped = await env.DB.prepare(
     `INSERT INTO pedidos (codigo, cliente_id, cliente_nome, cliente_telefone, recebimento, regiao_id, regiao_nome,
-       endereco, referencia, pagamento, troco_para, observacoes, subtotal, taxa_entrega, total, cliente_cpf_cnpj)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`).bind(
+       endereco, referencia, pagamento, troco_para, observacoes, subtotal, taxa_entrega, total, cliente_cpf_cnpj,
+       tipo, condicional_status, condicional_prazo)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`).bind(
     codigo, cli.id, nome, telefone, recebimento, regiao?.id ?? null, regiao?.nome ?? null,
     recebimento === 'entrega' ? endereco : null, recebimento === 'entrega' ? referencia : null,
-    pagamento, troco, obs || null, subtotal, taxa, total, cpfCnpj || null).first();
+    pagamento, troco, obs || null, subtotal, taxa, total, cpfCnpj || null,
+    condicional ? 'condicional' : 'venda', condicional ? 'aberto' : null, prazo).first();
 
   const stmts = itens.map((i) => env.DB.prepare(
     `INSERT INTO pedido_itens (pedido_id, produto_id, variacao_id, nome, variacao, unidade, preco_unit, quantidade, total)
      VALUES (?,?,?,?,?,?,?,?,?)`).bind(ped.id, i.p.id, i.v?.id ?? null, i.p.nome, i.v?.nome ?? null,
     i.p.unidade, i.preco, i.qtd, i.total));
-  // baixa de estoque (só onde é controlado)
-  for (const i of itens) {
+  // baixa de estoque (só onde é controlado). Condicional não baixa: só a venda gerada depois.
+  if (!condicional) for (const i of itens) {
     if (i.v && i.v.estoque !== null) stmts.push(env.DB.prepare('UPDATE produto_variacoes SET estoque = estoque - ? WHERE id = ?').bind(i.qtd, i.v.id));
     else if (!i.v && i.p.estoque !== null) stmts.push(env.DB.prepare('UPDATE produtos SET estoque = estoque - ? WHERE id = ?').bind(i.qtd, i.p.id));
   }
@@ -369,7 +378,8 @@ async function criarPedido(req, env) {
   }[pagamento];
 
   const L = [];
-  L.push(`*Novo pedido ${codigo}* — ${cfg.nome}`);
+  L.push(condicional ? `*Novo CONDICIONAL ${codigo}* — ${cfg.nome}` : `*Novo pedido ${codigo}* — ${cfg.nome}`);
+  if (condicional) L.push(`_Peças para provar. Devolução até ${prazo.split('-').reverse().join('/')}; pago só o que ficar._`);
   L.push('');
   L.push(`*Cliente:* ${nome}`);
   L.push(`*Telefone:* ${fone(telefone)}`);
@@ -381,13 +391,13 @@ async function criarPedido(req, env) {
   L.push('');
   L.push(`Subtotal: ${brl(subtotal)}`);
   if (recebimento === 'entrega') L.push(`Entrega${regiao ? ' (' + regiao.nome + ')' : ''}: ${taxa ? brl(taxa) : 'grátis'}`);
-  L.push(`*Total: ${brl(total)}*`);
+  L.push(condicional ? `*Total das peças: ${brl(total)}*` : `*Total: ${brl(total)}*`);
   L.push('');
   if (recebimento === 'entrega') {
     L.push(`*Entrega:* ${endereco}`);
     if (referencia) L.push(`Referência: ${referencia}`);
   } else L.push('*Retirada na loja*');
-  L.push(`*Pagamento:* ${pagTxt}`);
+  L.push(`*Pagamento${condicional ? ' (do que ficar)' : ''}:* ${pagTxt}`);
   if (obs) L.push(`*Observações:* ${obs}`);
 
   let pix = null;
@@ -400,7 +410,7 @@ async function criarPedido(req, env) {
   }
   const mensagem = L.join('\n');
   return json({
-    codigo, subtotal, taxa_entrega: taxa, total, mensagem, pix,
+    codigo, tipo: condicional ? 'condicional' : 'venda', condicional_prazo: prazo, subtotal, taxa_entrega: taxa, total, mensagem, pix,
     whatsapp_url: `https://wa.me/${numeroWhats(cfg.whatsapp)}?text=${encodeURIComponent(mensagem)}`,
   }, 201);
 }
@@ -539,6 +549,8 @@ const CONFIG_CAMPOS = {
   instagram: (v) => usuarioInstagram(v), endereco_loja: (v) => texto(v, 200) || null,
   horario: (v) => texto(v, 200) || null, aviso_topo: (v) => texto(v, 400) || null,
   pedido_minimo: (v) => Math.max(0, inteiro(v, 0)), permite_retirada: (v) => (v ? 1 : 0), permite_entrega: (v) => (v ? 1 : 0),
+  condicional_ativo: (v) => (v ? 1 : 0), condicional_prazo_dias: (v) => Math.min(30, Math.max(1, inteiro(v, 2))),
+  condicional_regras: (v) => texto(v, 400) || null,
   pix_ativo: (v) => (v ? 1 : 0), pix_tipo: (v) => (['cpf', 'cnpj', 'email', 'telefone', 'aleatoria'].includes(v) ? v : null),
   pix_chave: (v) => texto(v, 100) || null, pix_titular: (v) => texto(v, 80) || null, pix_banco: (v) => texto(v, 60) || null,
   pix_cidade: (v) => texto(v, 40) || null,
@@ -705,8 +717,10 @@ async function rotear(req, env) {
     const codigoPedido = async () => (await env.DB.prepare('SELECT codigo FROM pedidos WHERE id = ?').bind(id).first('codigo')) || `pedido ${id}`;
     if (m === 'GET' && !id) {
       const st = url.searchParams.get('status');
+      const cond = st === 'condicional';  // "condicionais em aberto"
+      const onde = cond ? `WHERE tipo = 'condicional' AND condicional_status = 'aberto' AND status != 'cancelado'` : st ? 'WHERE status = ?' : '';
       const r = await env.DB.prepare(`SELECT p.*, (SELECT COUNT(*) FROM pedido_itens i WHERE i.pedido_id = p.id) AS qtd_itens
-        FROM pedidos p ${st ? 'WHERE status = ?' : ''} ORDER BY p.id DESC LIMIT 300`).bind(...(st ? [st] : [])).all();
+        FROM pedidos p ${onde} ORDER BY p.id DESC LIMIT 300`).bind(...(st && !cond ? [st] : [])).all();
       return json(r.results);
     }
     if (m === 'GET') {
@@ -716,6 +730,10 @@ async function rotear(req, env) {
       ]);
       return p.results[0] ? json({ ...p.results[0], itens: itens.results }) : erro('Pedido não encontrado.', 404);
     }
+    const ehCondicional = async () => (await env.DB.prepare('SELECT tipo FROM pedidos WHERE id = ?').bind(id).first('tipo')) === 'condicional';
+    if (m === 'POST' && (seg[2] === 'enviar-erp' || seg[2] === 'emitir-nota') && (await ehCondicional()))
+      return erro('Condicional não vai ao ERP nem gera nota. Efetive a venda: o pedido de venda gerado é que segue para o TagPlus.');
+    if (m === 'POST' && seg[2] === 'condicional') return fecharCondicional(env, u, id, await req.json().catch(() => ({})), req);
     if (m === 'POST' && seg[2] === 'enviar-erp') {
       exigir(u, 'pedidos.erp');
       exigirTagplus(env);
@@ -736,12 +754,13 @@ async function rotear(req, env) {
     if (m === 'PUT') {
       exigir(u, 'pedidos.status');
       const { status } = await req.json();
-      const atual = await env.DB.prepare('SELECT status FROM pedidos WHERE id = ?').bind(id).first('status');
-      if (!atual) return erro('Pedido não encontrado.', 404);
+      const ped = await env.DB.prepare('SELECT status, tipo FROM pedidos WHERE id = ?').bind(id).first();
+      if (!ped) return erro('Pedido não encontrado.', 404);
+      const atual = ped.status, cond = ped.tipo === 'condicional';
       if (status !== atual) await auditar(env, u, 'pedido.status', await codigoPedido(), { de: atual, para: status }, req);
       const st = [env.DB.prepare(`UPDATE pedidos SET status = ?, atualizado_em = datetime('now') WHERE id = ?`).bind(status, id)];
       // cancelou → devolve estoque; reativou → baixa de novo
-      if ((status === 'cancelado') !== (atual === 'cancelado')) {
+      if (!cond && (status === 'cancelado') !== (atual === 'cancelado')) {
         const sinal = status === 'cancelado' ? '+' : '-';
         st.push(env.DB.prepare(`UPDATE produto_variacoes SET estoque = estoque ${sinal} (SELECT SUM(quantidade) FROM pedido_itens i
           WHERE i.pedido_id = ? AND i.variacao_id = produto_variacoes.id) WHERE estoque IS NOT NULL AND id IN
@@ -751,18 +770,75 @@ async function rotear(req, env) {
           (SELECT produto_id FROM pedido_itens WHERE pedido_id = ? AND variacao_id IS NULL)`).bind(id, id));
       }
       await env.DB.batch(st).catch(() => { throw new HttpError('Status inválido.'); });
-      if (status === 'confirmado' && atual !== 'confirmado' && tagplusConfigurado(env)) {
-        const opc = { ...OPCOES_PADRAO, ...((await lerChave(env, 'tagplus_opcoes')) || {}) };
-        if (opc.enviar_ao_confirmar && (await lerChave(env, 'tagplus_token'))) {
-          await env.DB.prepare(`UPDATE pedidos SET erp_status = 'pendente' WHERE id = ? AND tagplus_pedido_id IS NULL`).bind(id).run();
-          await enfileirar(env, 'enviar_pedido', id);
-          if (opc.emitir_nota_ao_confirmar) await enfileirar(env, 'emitir_nota', id, { tipo: opc.tipo_nota || 'nfce' });
-        }
-      }
+      if (!cond && status === 'confirmado' && atual !== 'confirmado') await aoConfirmar(env, id);
       return json({ ok: true });
     }
   }
   return erro('Rota não encontrada.', 404);
+}
+
+// Pedido de venda confirmado: segue para o TagPlus se a integração estiver ligada
+async function aoConfirmar(env, id) {
+  if (!tagplusConfigurado(env)) return;
+  const opc = { ...OPCOES_PADRAO, ...((await lerChave(env, 'tagplus_opcoes')) || {}) };
+  if (!opc.enviar_ao_confirmar || !(await lerChave(env, 'tagplus_token'))) return;
+  await env.DB.prepare(`UPDATE pedidos SET erp_status = 'pendente' WHERE id = ? AND tagplus_pedido_id IS NULL`).bind(id).run();
+  await enfileirar(env, 'enviar_pedido', id);
+  if (opc.emitir_nota_ao_confirmar) await enfileirar(env, 'emitir_nota', id, { tipo: opc.tipo_nota || 'nfce' });
+}
+
+// ---------------------------------------------------------------- condicional: efetivar ou devolver
+// body: { acao: 'efetivar' | 'devolver', ficou: { <item_id>: qtd }, pagamento?, cobrar_entrega? }
+// Efetivar gera um pedido de venda (código do condicional + "V") só com as peças que ficaram;
+// essa venda baixa o estoque e vai para o TagPlus. O condicional fica guardado como histórico.
+async function fecharCondicional(env, u, id, b, req) {
+  exigir(u, 'pedidos.status');
+  const [pr, ir] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM pedidos WHERE id = ?').bind(id),
+    env.DB.prepare('SELECT * FROM pedido_itens WHERE pedido_id = ? ORDER BY id').bind(id),
+  ]);
+  const c = pr.results[0];
+  if (!c) return erro('Pedido não encontrado.', 404);
+  if (c.tipo !== 'condicional') return erro('Este pedido não é condicional.');
+  if (c.condicional_status !== 'aberto') return erro('Este condicional já foi fechado.');
+  if (c.status === 'cancelado') return erro('Condicional cancelado. Reabra o status antes de fechar.');
+
+  const ficou = b.acao === 'devolver' ? {} : (b.ficou || {});
+  const itens = ir.results.map((i) => ({ ...i, fica: Math.min(i.quantidade, Math.max(0, inteiro(ficou[i.id], 0))) }));
+  const kept = itens.filter((i) => i.fica > 0);
+  const st = itens.map((i) => env.DB.prepare('UPDATE pedido_itens SET qtd_ficou = ? WHERE id = ?').bind(i.fica, i.id));
+
+  if (!kept.length) {
+    st.push(env.DB.prepare(`UPDATE pedidos SET condicional_status = 'devolvido', condicional_fechado_em = datetime('now'),
+      atualizado_em = datetime('now') WHERE id = ?`).bind(id));
+    await env.DB.batch(st);
+    await auditar(env, u, 'condicional.devolvido', c.codigo, null, req);
+    return json({ ok: true, devolvido: true });
+  }
+
+  const pagamento = ['pix_chave', 'pix_atendente', 'cartao', 'dinheiro'].includes(b.pagamento) ? b.pagamento : c.pagamento;
+  const subtotal = kept.reduce((s, i) => s + i.preco_unit * i.fica, 0);
+  const taxa = b.cobrar_entrega === false ? 0 : c.taxa_entrega;
+  const venda = await env.DB.prepare(
+    `INSERT INTO pedidos (codigo, cliente_id, cliente_nome, cliente_telefone, recebimento, regiao_id, regiao_nome, endereco, referencia,
+       pagamento, observacoes, subtotal, taxa_entrega, total, cliente_cpf_cnpj, status, tipo, condicional_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'confirmado','venda',?) RETURNING id, codigo`).bind(
+    c.codigo + 'V', c.cliente_id, c.cliente_nome, c.cliente_telefone, c.recebimento, c.regiao_id, c.regiao_nome, c.endereco, c.referencia,
+    pagamento, `Venda do condicional ${c.codigo}`, subtotal, taxa, subtotal + taxa, c.cliente_cpf_cnpj, id).first();
+  for (const i of kept) {
+    st.push(env.DB.prepare(`INSERT INTO pedido_itens (pedido_id, produto_id, variacao_id, nome, variacao, unidade, preco_unit, quantidade, total)
+      VALUES (?,?,?,?,?,?,?,?,?)`).bind(venda.id, i.produto_id, i.variacao_id, i.nome, i.variacao, i.unidade, i.preco_unit, i.fica, i.preco_unit * i.fica));
+    // baixa de estoque só agora, e só do que ficou
+    if (i.variacao_id) st.push(env.DB.prepare('UPDATE produto_variacoes SET estoque = estoque - ? WHERE id = ? AND estoque IS NOT NULL').bind(i.fica, i.variacao_id));
+    else if (i.produto_id) st.push(env.DB.prepare('UPDATE produtos SET estoque = estoque - ? WHERE id = ? AND estoque IS NOT NULL').bind(i.fica, i.produto_id));
+  }
+  st.push(env.DB.prepare(`UPDATE pedidos SET condicional_status = 'efetivado', venda_id = ?, condicional_fechado_em = datetime('now'),
+    atualizado_em = datetime('now') WHERE id = ?`).bind(venda.id, id));
+  try { await env.DB.batch(st); }
+  catch (e) { await env.DB.prepare('DELETE FROM pedidos WHERE id = ?').bind(venda.id).run(); throw e; }
+  await auditar(env, u, 'condicional.efetivado', c.codigo, { venda: venda.codigo, pecas: kept.reduce((s, i) => s + i.fica, 0), total: subtotal + taxa }, req);
+  await aoConfirmar(env, venda.id);
+  return json({ ok: true, venda_id: venda.id, venda_codigo: venda.codigo, total: subtotal + taxa });
 }
 
 // ---------------------------------------------------------------- TagPlus: conexão, opções, diagnóstico
